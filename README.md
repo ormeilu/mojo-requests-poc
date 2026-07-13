@@ -2,10 +2,10 @@
 
 A pure-Mojo HTTP client library, modeled after Python's [`requests`](https://docs.python-requests.org/).
 
-**No Python. No libcurl. No external C dependencies.** TCP sockets are provided via libc FFI
-(`external_call`) against the system's libc (`socket`, `connect`, `send`, `recv`, `close`). Everything
-else — URL parsing, HTTP/1.1 framing, chunked transfer decoding, percent-encoding, and a JSON parser —
-is written in Mojo.
+**No Python. No libcurl.** TCP sockets are provided via libc FFI (`external_call`) against the system's
+libc (`socket`, `connect`, `send`, `recv`, `close`). HTTPS/TLS is provided via OpenSSL (auto-discovered
+and `dlopen`'d at runtime). Everything else — URL parsing, HTTP/1.1 framing, chunked transfer decoding,
+percent-encoding, and a JSON parser — is written in Mojo.
 
 > **Mojo version:** built and tested against Mojo 1.0.0b3 (nightly). Mojo is evolving rapidly; older or
 > newer builds may require small adjustments.
@@ -16,8 +16,9 @@ is written in Mojo.
 # Clone, then enter the environment
 pixi shell
 
-# Run the test suite (15 tests)
+# Run the test suite (24 tests: 16 HTTP + 8 HTTPS)
 pixi run test
+pixi run mojo -I . tests/test_https.mojo   # HTTPS-specific tests
 
 # Run the demo (starts a local HTTP server for you to hit)
 pixi run demo
@@ -48,6 +49,10 @@ print(parsed["name"].as_string())
 var s = requests.Session()
 s.headers["Authorization"] = "Bearer xyz"
 var r4 = s.get("http://example.com/protected")
+
+# HTTPS (TLS via OpenSSL — certificate verification enabled by default)
+var r5 = requests.get("https://example.com/", timeout=15.0)
+print(r5.status_code)       # 200
 
 # Error handling
 var err = s.get("http://example.com/missing")
@@ -117,13 +122,13 @@ Mojo's `Error` is a builtin struct (not a conformance trait), so exceptions are 
 that return a categorized `Error`. Classify a caught error with `exception_kind()`:
 
 ```mojo
-from requests.exceptions import connection_error, http_error, timeout_error, exception_kind
+from requests.exceptions import connection_error, http_error, timeout_error, ssl_error, exception_kind
 
 try:
     var r = requests.get(url, timeout=5.0)
     r.raise_for_status()
 except e:
-    var kind = exception_kind(e)   # "ConnectionError" | "Timeout" | "HTTPError" | ...
+    var kind = exception_kind(e)   # "ConnectionError" | "Timeout" | "HTTPError" | "SSLError" | ...
     print("failed:", kind, e)
 ```
 
@@ -135,38 +140,33 @@ The library is layered (each file is independently testable):
 requests/
 ├── __init__.mojo    # public re-exports
 ├── api.mojo         # module-level get/post/... (delegates to Session)
-├── session.mojo     # request orchestration: URL → headers → wire format → socket → parse
+├── session.mojo     # request orchestration: URL → DNS → headers → wire format → socket/TLS → parse
 ├── models.mojo      # Response, Headers (case-insensitive)
 ├── _http.mojo       # HTTP/1.1 request building + response framing (Content-Length + chunked)
 ├── _url.mojo        # URL parser + percent-encoding
-├── _dns.mojo        # DNS resolution (inet_pton → gethostbyname fallback) via libc
+├── _dns.mojo        # DNS resolution (inet_pton → getaddrinfo) via libc
 ├── _net.mojo        # TCPSocket: socket/connect/send/recv/close/timeout via libc FFI
+├── _tls.mojo        # TLSConnection: OpenSSL TLS layer (dlopen'd, SNI + cert verification)
 ├── _json.mojo       # minimal recursive-descent JSON parser (std.json doesn't exist in Mojo 1.0)
 └── exceptions.mojo  # error constructors + classifier
 ```
 
 **Networking:** Mojo 1.0 has no `std.net` / `std.socket`. This library calls libc syscalls directly via
 `std.ffi.external_call["socket"|"connect"|"send"|"recv"|"close"|"setsockopt", ...]`. DNS resolution uses
-`inet_pton` for dotted-decimal IPs and `gethostbyname` for hostnames.
+`inet_pton` for dotted-decimal IPs and `getaddrinfo` (thread-safe) for hostnames.
+
+**TLS/HTTPS:** OpenSSL is auto-discovered (Homebrew `/opt/homebrew/lib`, `/usr/local/lib`, Linux
+`/usr/lib`, etc.) and loaded at runtime via `OwnedDLHandle` (dlopen). The `TLSConnection` wraps the
+already-connected raw socket: `SSL_CTX_new` → `SSL_new` → `SSL_set_fd` → `SSL_set_tlsext_host_name` (SNI)
+→ `SSL_connect`. Certificate verification is enabled by default (`SSL_VERIFY_PEER` + system CA store).
 
 ## Limitations & roadmap
 
-- **HTTP only (no HTTPS/TLS).** TLS is a large, separate effort. v1 is plain HTTP. See roadmap below.
 - **IPv4 only** (the `sockaddr_in` path). IPv6 support would add a `sockaddr_in6` path.
 - **No redirects.** `allow_redirects` is not yet implemented (responses are returned as-is).
 - **No cookie jar persistence.** Sessions carry default headers but don't persist `Set-Cookie`.
 - **No streaming.** The full response is read into memory (`recv` until close).
-
-### HTTPS roadmap
-
-Adding HTTPS requires a TLS implementation. Possible approaches, in order of "purity":
-
-1. **Pure-Mojo TLS** — implement TLS 1.2/1.3 (record layer, handshake, AES-GCM/ChaCha20-Poly1305,
-   X.509 validation). The most work, but keeps the "pure Mojo" guarantee. A Mojo `BoringSSL`-style
-   package would be a strong community contribution.
-2. **FFI to libssl/BoringSSL** — call `SSL_read`/`SSL_write` via `external_call`. Practical and fast, but
-   the TLS layer is C, not Mojo. A pluggable `TLSContext` hook is already architecturally feasible since
-   `_net.mojo` is the single socket boundary.
+- **TLS requires OpenSSL** to be installed (the library auto-discovers it; raises `SSLError` if not found).
 
 ## License
 

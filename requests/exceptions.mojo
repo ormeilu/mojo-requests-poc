@@ -17,6 +17,7 @@ comptime TIMEOUT_PREFIX = "Timeout"
 comptime INVALID_URL_PREFIX = "InvalidURL"
 comptime UNSUPPORTED_SCHEME_PREFIX = "UnsupportedScheme"
 comptime HTTP_ERROR_PREFIX = "HTTPError"
+comptime SSL_PREFIX = "SSLError"
 comptime REQUEST_PREFIX = "RequestException"
 
 
@@ -54,6 +55,11 @@ def http_error(msg: String, status_code: Int) -> Error:
     return Error(t"HTTPError {status_code}: {msg}")
 
 
+def ssl_error(msg: String) -> Error:
+    """A TLS/SSL error (handshake failure, certificate validation, missing libssl, etc.)."""
+    return Error(t"SSLError: {msg}")
+
+
 # --- Classification --------------------------------------------------------
 
 
@@ -74,6 +80,8 @@ def exception_kind(err: Error) -> String:
         return UNSUPPORTED_SCHEME_PREFIX
     if _starts_with(s, HTTP_ERROR_PREFIX):
         return HTTP_ERROR_PREFIX
+    if _starts_with(s, SSL_PREFIX):
+        return SSL_PREFIX
     return REQUEST_PREFIX
 
 

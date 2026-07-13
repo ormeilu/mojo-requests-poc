@@ -33,14 +33,14 @@ struct URL(Movable, Writable):
         return self.path
 
     def origin(self) -> String:
-        """``scheme://host[:port]`` (omits default port 80)."""
-        if self.port == 80:
+        """``scheme://host[:port]`` (omits default ports 80/443)."""
+        if (self.scheme == "http" and self.port == 80) or (self.scheme == "https" and self.port == 443):
             return self.scheme + "://" + self.host
         return self.scheme + "://" + self.host + ":" + String(self.port)
 
     def host_header(self) -> String:
-        """Host header value (host[:port] if non-default)."""
-        if self.port == 80:
+        """Host header value (host[:port] if non-default for the scheme)."""
+        if (self.scheme == "http" and self.port == 80) or (self.scheme == "https" and self.port == 443):
             return self.host
         return self.host + ":" + String(self.port)
 
@@ -62,8 +62,8 @@ def parse_url(raw: String) raises -> URL:
         raise invalid_url_error(String(t"URL missing scheme (use http://): {raw}"))
     u.scheme = _to_lower(String(s[byte=0:sep]))
 
-    if u.scheme != "http":
-        raise unsupported_scheme_error(String(t"scheme '{u.scheme}' not supported (http only in v1)"))
+    if u.scheme != "http" and u.scheme != "https":
+        raise unsupported_scheme_error(String(t"scheme '{u.scheme}' not supported (only http/https)"))
 
     var rest_start = sep + 3  # skip "://"
     var rest = String(s[byte=rest_start:])
@@ -104,7 +104,11 @@ def parse_url(raw: String) raises -> URL:
         u.port = parsed_port.value()
     else:
         u.host = authority
-        u.port = 80
+        # Default port: 443 for https, 80 for http.
+        if u.scheme == "https":
+            u.port = 443
+        else:
+            u.port = 80
 
     return u^
 

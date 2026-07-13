@@ -13,6 +13,7 @@ from .exceptions import (
 )
 from .models import Response, Headers
 from .session import Session
+from ._tls import TLSConnection
 from .api import (
     request,
     get,

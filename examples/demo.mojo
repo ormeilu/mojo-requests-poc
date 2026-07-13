@@ -43,4 +43,11 @@ def main() raises:
     print("    r.text() preview:", String(r.text()[byte=0:50]), "...")
     print()
 
+    # 5. HTTPS (TLS via OpenSSL) — a real https:// request with certificate verification
+    print("[5] HTTPS GET (TLS)")
+    var r4 = requests.get("https://example.com/", timeout=15.0)
+    print("    status:", r4.status_code, "| ok:", r4.ok())
+    print("    body bytes:", r4.text().byte_length())
+    print()
+
     print("=== demo complete ===")

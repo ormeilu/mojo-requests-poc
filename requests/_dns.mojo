@@ -2,15 +2,17 @@
 #
 # `resolve(host)` returns an IPv4 address as a host-byte-order UInt32 (the in-memory representation
 # expected by `sockaddr_in.sin_addr`). It first tries `inet_pton` for dotted-decimal input, then falls
-# back to `gethostbyname` for hostnames.
+# back to `getaddrinfo` (thread-safe, heap-allocated) for hostnames.
 
 from std.ffi import external_call, c_int
 from std.memory import alloc
 from .exceptions import connection_error
 
 
-# AF_INET == 2
+# POSIX constants
 comptime AF_INET: c_int = 2
+comptime SOCK_STREAM: c_int = 1
+comptime AI_NUMERICHOST: c_int = 0x4  # macOS/Linux
 
 
 @fieldwise_init
@@ -19,14 +21,26 @@ struct InAddr:
     var s_addr: UInt32
 
 
+# Minimal mirror of `struct sockaddr_in` (16 bytes).
 @fieldwise_init
-struct Hostent:
-    """Minimal mirror of libc ``struct hostent`` — only the fields we read."""
-    var h_name: UInt64
-    var h_aliases: UInt64
-    var h_addrtype: c_int
-    var h_length: c_int
-    var h_addr_list: UInt64
+struct SockAddrIn:
+    var sin_family: UInt16
+    var sin_port: UInt16
+    var sin_addr: UInt32
+    var sin_zero: SIMD[DType.uint8, 8]
+
+
+# Minimal mirror of `struct addrinfo` (we only read ai_family, ai_addrlen, ai_addr, ai_next).
+@fieldwise_init
+struct AddrInfo:
+    var ai_flags: c_int
+    var ai_family: c_int
+    var ai_socktype: c_int
+    var ai_protocol: c_int
+    var ai_addrlen: UInt64
+    var ai_canonname: UInt64
+    var ai_addr: UInt64
+    var ai_next: UInt64
 
 
 def resolve(host: String) raises -> UInt32:
@@ -44,30 +58,48 @@ def resolve(host: String) raises -> UInt32:
         return addr
     dst.free()
 
-    # Fall back to gethostbyname for hostnames.
+    # Fall back to getaddrinfo for hostnames.
     return _resolve_by_name(host)
 
 
 def _resolve_by_name(host: String) raises -> UInt32:
-    """Resolve a hostname via libc ``gethostbyname``.
+    """Resolve a hostname via libc ``getaddrinfo`` (thread-safe, heap-allocated — unlike gethostbyname)."""
+    var hints = alloc[AddrInfo](1)
+    hints[].ai_flags = 0
+    hints[].ai_family = AF_INET
+    hints[].ai_socktype = SOCK_STREAM
+    hints[].ai_protocol = 0
+    hints[].ai_addrlen = 0
+    hints[].ai_canonname = 0
+    hints[].ai_addr = 0
+    hints[].ai_next = 0
 
-    gethostbyname is thread-unsafe/obsolete but ubiquitous and sufficient for a v1 client. We call it single-threaded from Mojo, fine for sequential request issuance.
-    """
-    var he = external_call["gethostbyname", UnsafePointer[Hostent, MutUntrackedOrigin]](host.unsafe_ptr())
-    # gethostbyname returns NULL (address 0) on failure. Compare via the raw address.
-    if Int(he) == 0:
+    var result_addr = alloc[UnsafePointer[AddrInfo, MutUntrackedOrigin]](1)
+
+    var rc = external_call["getaddrinfo", c_int](
+        host.unsafe_ptr(),
+        c_int(0),  # service = NULL (we only want address resolution, not port)
+        hints,
+        result_addr,
+    )
+    hints.free()
+    if rc != c_int(0):
+        result_addr.free()
         raise connection_error(String(t"DNS resolution failed for host: {host}"))
 
-    # h_addr_list is a `char**` stored as a raw address (UInt64). Reconstruct the pointer-to-pointer.
-    var addr_list_addr = he[].h_addr_list
-    if addr_list_addr == 0:
-        raise connection_error(String(t"DNS returned no addresses for host: {host}"))
-    var addr_ptr_ptr = UnsafePointer[UnsafePointer[UInt32, MutUntrackedOrigin], MutUntrackedOrigin](
-        unsafe_from_address=Int(addr_list_addr)
-    )
-    # h_addr_list is a NULL-terminated list of pointers; the first entry is the primary address.
-    var first = addr_ptr_ptr[]
+    var first = result_addr[]
+    result_addr.free()
     if Int(first) == 0:
         raise connection_error(String(t"DNS returned no addresses for host: {host}"))
 
-    return first[]
+    # ai_addr points to a sockaddr; for AF_INET it's a sockaddr_in. Reinterpret and read sin_addr.
+    var ai_addr = first[].ai_addr
+    if ai_addr == 0:
+        _ = external_call["freeaddrinfo", NoneType](first)
+        raise connection_error(String(t"DNS entry has no address for host: {host}"))
+
+    var sockaddr_ptr = UnsafePointer[SockAddrIn, MutUntrackedOrigin](unsafe_from_address=Int(ai_addr))
+    var ip = sockaddr_ptr[].sin_addr
+
+    _ = external_call["freeaddrinfo", NoneType](first)
+    return ip

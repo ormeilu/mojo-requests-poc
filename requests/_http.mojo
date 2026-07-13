@@ -17,8 +17,8 @@ comptime HEADER_TERMINATOR = "\r\n\r\n"
 
 def build_request(
     method: String,
-    url: URL,
-    headers: Dict[String, String],
+    read url: URL,
+    read headers: Dict[String, String],
     body: String,
 ) -> String:
     """Assemble the HTTP/1.1 request wire format.

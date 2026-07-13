@@ -63,6 +63,10 @@ struct TCPSocket:
     def __del__(deinit self):
         self.close()
 
+    def fd_value(self) -> c_int:
+        """The raw socket file descriptor (for binding to a TLS layer)."""
+        return self.fd
+
     def connect(mut self, host: String, port: Int, timeout: Optional[Float64] = None) raises:
         """Open a TCP connection to ``host:port``.
 
@@ -70,7 +74,18 @@ struct TCPSocket:
         ``timeout`` (seconds) applies to this connect and subsequent send/recv.
         """
         var addr = _dns_resolve(host)
+        self._connect_addr(addr, port, timeout, host)
 
+    def connect_ip(mut self, addr: UInt32, port: Int, timeout: Optional[Float64] = None) raises:
+        """Open a TCP connection to a pre-resolved IPv4 address (host byte order).
+
+        Use this when DNS was already resolved by the caller (avoids re-resolution).
+        """
+        self._connect_addr(addr, port, timeout, String())
+
+    def _connect_addr(
+        mut self, addr: UInt32, port: Int, timeout: Optional[Float64], host_label: String
+    ) raises:
         var raw_fd = external_call["socket", c_int](AF_INET, SOCK_STREAM, c_int(0))
         if raw_fd < c_int(0):
             raise connection_error("socket() failed")
@@ -91,8 +106,9 @@ struct TCPSocket:
         sa.free()
         if rc < c_int(0):
             self._raw_close()
-            # Distinguish timeout (EINPROGRESS-ish) from plain refusal heuristically.
-            raise connection_error(String(t"connect() to {host}:{String(port)} failed"))
+            if host_label.byte_length() > 0:
+                raise connection_error(String(t"connect() to {host_label}:{String(port)} failed"))
+            raise connection_error(String(t"connect() to port {String(port)} failed"))
 
     def _set_timeouts(mut self, timeout_secs: Float64) raises:
         var tv = alloc[Timeval](1)

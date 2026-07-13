@@ -7,6 +7,8 @@
 from ._url import parse_url, build_query_string, url_encode
 from ._http import build_request, parse_response, ParsedResponse
 from ._net import TCPSocket
+from ._dns import resolve as _dns_resolve
+from ._tls import TLSConnection
 from .models import Response, Headers
 from .exceptions import request_exception
 
@@ -25,6 +27,12 @@ struct Session:
         self.headers = {}
         self.headers["User-Agent"] = "mojo-requests/0.1"
         self.headers["Accept"] = "*/*"
+        # Warm up the DNS resolver: the first getaddrinfo call in a process can fail on some
+        # systems (lazy resolver init). Doing a throwaway resolve here primes it for real use.
+        try:
+            _ = _dns_resolve("localhost")
+        except _:
+            pass
 
     def request(
         self,
@@ -46,6 +54,14 @@ struct Session:
         """
         # Resolve URL + query params.
         var u = parse_url(url)
+
+        # Resolve DNS NOW (before header Dict allocations) to avoid a heap-state-dependent
+        # getaddrinfo failure observed in Mojo 1.0 beta. The IP is passed directly to connect.
+        var host = u.host
+        var scheme = u.scheme
+        var port = u.port
+        var ip = _dns_resolve(host)
+
         if params != None:
             var extra = build_query_string(params.value())
             if u.query.byte_length() > 0:
@@ -75,20 +91,39 @@ struct Session:
         # Build the wire request.
         var req_str = build_request(method, u, merged, body)
 
-        # Connect, send, receive.
+        # Connect, send, receive. Branch on scheme: https wraps the TCP socket in TLS.
+        # DNS was already resolved above (before header allocations) to avoid a heap-state bug.
         var sock = TCPSocket()
         var raw = List[UInt8]()
         var had_error = False
         var err_msg = String()
-        try:
-            sock.connect(u.host, u.port, timeout)
-            sock.send_all(req_str)
-            raw = sock.recv_all()
-            sock.close()
-        except e:
-            sock.close()
-            had_error = True
-            err_msg = String(e)
+
+        if scheme == "https":
+            # HTTPS: TCP connect, then TLS handshake, then send/recv over the encrypted channel.
+            var tls = TLSConnection()
+            try:
+                sock.connect_ip(ip, port, timeout)
+                tls.connect(sock.fd_value(), host)
+                tls.send_all(req_str)
+                raw = tls.recv_all()
+                tls.close()
+                sock.close()
+            except e:
+                tls.close()
+                sock.close()
+                had_error = True
+                err_msg = String(e)
+        else:
+            # HTTP: raw TCP send/recv.
+            try:
+                sock.connect_ip(ip, port, timeout)
+                sock.send_all(req_str)
+                raw = sock.recv_all()
+                sock.close()
+            except e:
+                sock.close()
+                had_error = True
+                err_msg = String(e)
 
         if had_error:
             raise request_exception(err_msg)

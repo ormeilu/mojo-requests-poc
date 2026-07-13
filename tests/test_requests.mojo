@@ -50,13 +50,21 @@ def test_parse_default_port() raises:
     assert_equal(u.host_header(), "localhost")
 
 
-def test_parse_rejects_https() raises:
+def test_parse_accepts_https() raises:
+    var u = parse_url("https://example.com/path")
+    assert_equal(u.scheme, "https")
+    assert_equal(u.port, 443)
+    assert_equal(u.host_header(), "example.com")
+    assert_equal(u.origin(), "https://example.com")
+
+
+def test_parse_rejects_ftp_scheme() raises:
     var raised = False
     try:
-        _ = parse_url("https://example.com")
+        _ = parse_url("ftp://example.com")
     except _:
         raised = True
-    assert_true(raised, "https scheme should be rejected")
+    assert_true(raised, "ftp scheme should be rejected")
 
 
 def test_parse_missing_scheme() raises:
