@@ -1,0 +1,15 @@
+[workspace]
+authors = ["Ilya Lubenets <lubenets.ilya.igorevich@gmail.com>"]
+channels = ["https://conda.modular.com/max-nightly", "conda-forge"]
+name = "mojo-requests"
+platforms = ["osx-arm64"]
+version = "0.1.0"
+
+[tasks]
+# Run the test suite (15 tests covering URL parsing, HTTP framing, JSON, encoding)
+test = "mojo -I . tests/test_requests.mojo"
+# Run the demo (optionally start a local server first: python3 -m http.server 18090)
+demo = "mojo -I . examples/demo.mojo"
+
+[dependencies]
+mojo = ">=1.0.0b3.dev2026071306,<2"
