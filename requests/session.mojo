@@ -38,11 +38,12 @@ struct Session:
         self,
         method: String,
         url: String,
-        params: Optional[Dict[String, String]] = None,
+        var params: Optional[Dict[String, String]] = None,
         headers: Optional[Dict[String, String]] = None,
         data: Optional[String] = None,
         json: Optional[String] = None,
         timeout: Optional[Float64] = None,
+        allow_redirects: Bool = True,
     ) raises -> Response:
         """Issue an HTTP request and return a Response.
 
@@ -51,7 +52,61 @@ struct Session:
         - ``data``: raw request body (form-encoded string, etc.).
         - ``json``: JSON body string (also sets Content-Type: application/json).
         - ``timeout``: per-call connect/send/recv timeout in seconds.
+        - ``allow_redirects``: follow 3xx redirects (default True). Up to MAX_REDIRECTS hops.
         """
+        var current_url = url
+        var redirect_method = method
+        var current_data = data
+        var current_json = json
+
+        # First request: consumes params (owned). Subsequent redirects pass None for params.
+        var resp = self._do_request(redirect_method, current_url, params^, headers, current_data, current_json, timeout)
+
+        comptime MAX_REDIRECTS = 30
+        if not allow_redirects:
+            return resp^
+
+        for _ in range(MAX_REDIRECTS):
+            # Not a redirect? Return.
+            if resp.status_code < 300 or resp.status_code >= 400:
+                return resp^
+
+            # No Location header? Return as-is.
+            if not resp.headers.contains("location"):
+                return resp^
+
+            var location = resp.headers["location"]
+            if location.byte_length() == 0:
+                return resp^
+
+            # Resolve relative redirects against the current URL.
+            current_url = _resolve_redirect(current_url, location)
+
+            # 303 / 301/302 after POST → GET (matches Python requests behavior).
+            if resp.status_code == 303 or (
+                (resp.status_code == 301 or resp.status_code == 302) and redirect_method == "POST"
+            ):
+                redirect_method = "GET"
+                current_data = None
+                current_json = None
+
+            # Issue the next request (no params on redirects).
+            var none_params: Optional[Dict[String, String]] = None
+            resp = self._do_request(redirect_method, current_url, none_params^, headers, current_data, current_json, timeout)
+
+        raise request_exception("too many redirects (max 30)")
+
+    def _do_request(
+        self,
+        method: String,
+        url: String,
+        params: Optional[Dict[String, String]],
+        headers: Optional[Dict[String, String]],
+        data: Optional[String],
+        json: Optional[String],
+        timeout: Optional[Float64],
+    ) raises -> Response:
+        """Perform a single HTTP request (no redirect following)."""
         # Resolve URL + query params.
         var u = parse_url(url)
 
@@ -143,50 +198,57 @@ struct Session:
     # --- Convenience method shortcuts ---
 
     def get(
-        self, url: String, params: Optional[Dict[String, String]] = None,
+        self, url: String, var params: Optional[Dict[String, String]] = None,
         headers: Optional[Dict[String, String]] = None,
         timeout: Optional[Float64] = None,
+        allow_redirects: Bool = True,
     ) raises -> Response:
-        return self.request("GET", url, params=params, headers=headers, timeout=timeout)
+        return self.request("GET", url, params=params^, headers=headers, timeout=timeout, allow_redirects=allow_redirects)
 
     def post(
         self, url: String, data: Optional[String] = None, json: Optional[String] = None,
         headers: Optional[Dict[String, String]] = None,
         timeout: Optional[Float64] = None,
+        allow_redirects: Bool = True,
     ) raises -> Response:
-        return self.request("POST", url, headers=headers, data=data, json=json, timeout=timeout)
+        return self.request("POST", url, headers=headers, data=data, json=json, timeout=timeout, allow_redirects=allow_redirects)
 
     def put(
         self, url: String, data: Optional[String] = None, json: Optional[String] = None,
         headers: Optional[Dict[String, String]] = None,
         timeout: Optional[Float64] = None,
+        allow_redirects: Bool = True,
     ) raises -> Response:
-        return self.request("PUT", url, headers=headers, data=data, json=json, timeout=timeout)
+        return self.request("PUT", url, headers=headers, data=data, json=json, timeout=timeout, allow_redirects=allow_redirects)
 
     def patch(
         self, url: String, data: Optional[String] = None, json: Optional[String] = None,
         headers: Optional[Dict[String, String]] = None,
         timeout: Optional[Float64] = None,
+        allow_redirects: Bool = True,
     ) raises -> Response:
-        return self.request("PATCH", url, headers=headers, data=data, json=json, timeout=timeout)
+        return self.request("PATCH", url, headers=headers, data=data, json=json, timeout=timeout, allow_redirects=allow_redirects)
 
     def delete(
         self, url: String, headers: Optional[Dict[String, String]] = None,
         timeout: Optional[Float64] = None,
+        allow_redirects: Bool = True,
     ) raises -> Response:
-        return self.request("DELETE", url, headers=headers, timeout=timeout)
+        return self.request("DELETE", url, headers=headers, timeout=timeout, allow_redirects=allow_redirects)
 
     def head(
         self, url: String, headers: Optional[Dict[String, String]] = None,
         timeout: Optional[Float64] = None,
+        allow_redirects: Bool = True,
     ) raises -> Response:
-        return self.request("HEAD", url, headers=headers, timeout=timeout)
+        return self.request("HEAD", url, headers=headers, timeout=timeout, allow_redirects=allow_redirects)
 
     def options(
         self, url: String, headers: Optional[Dict[String, String]] = None,
         timeout: Optional[Float64] = None,
+        allow_redirects: Bool = True,
     ) raises -> Response:
-        return self.request("OPTIONS", url, headers=headers, timeout=timeout)
+        return self.request("OPTIONS", url, headers=headers, timeout=timeout, allow_redirects=allow_redirects)
 
 
 # --- helpers ---
@@ -224,3 +286,79 @@ def _build_response(var parsed: ParsedResponse, url: String) -> Response:
     for b in parsed.body[]:
         body_copy.append(b)
     return Response(parsed.status_code, parsed.reason, hdrs^, body_copy^, url)
+
+
+def _resolve_redirect(base_url: String, location: String) raises -> String:
+    """Resolve a (possibly relative) Location header against the base URL.
+
+    Handles:
+    - Absolute:        "http://host/path"  → use as-is
+    - Protocol-rel:    "//host/path"       → "scheme://host/path"
+    - Root-relative:   "/path"             → "scheme://host/path"
+    - Relative:        "path"              → "scheme://host/current_dir/path"
+    """
+    # Absolute URL (has "://")
+    if _find(location, "://") >= 0:
+        return location
+
+    # Parse the base URL to get scheme + host.
+    var base = parse_url(base_url)
+    var origin = base.origin()
+
+    # Protocol-relative: "//host/path"
+    var loc_ptr = location.unsafe_ptr()
+    if location.byte_length() >= 2 and loc_ptr[0] == 0x2F and loc_ptr[1] == 0x2F:
+        return base.scheme + ":" + location
+
+    # Root-relative: "/path"
+    if location.byte_length() >= 1 and loc_ptr[0] == 0x2F:
+        return origin + location
+
+    # Relative: resolve against the current path's directory.
+    # Strip the filename from the base path, append the relative location.
+    var last_slash = _find_reverse(base.path, "/")
+    if last_slash >= 0:
+        var dir = String(base.path[byte=0 : last_slash + 1])
+        return origin + dir + location
+    return origin + "/" + location
+
+
+def _find_reverse(haystack: String, needle: String) -> Int:
+    """Return the byte index of the LAST occurrence of ``needle``, or -1."""
+    var hl = haystack.byte_length()
+    var nl = needle.byte_length()
+    if nl == 0 or hl < nl:
+        return -1
+    var hp = haystack.unsafe_ptr()
+    var np = needle.unsafe_ptr()
+    var i = hl - nl
+    while i >= 0:
+        var matched = True
+        for j in range(nl):
+            if hp[i + j] != np[j]:
+                matched = False
+                break
+        if matched:
+            return i
+        i -= 1
+    return -1
+
+
+def _find(haystack: String, needle: String) -> Int:
+    """Return the byte index of the first occurrence of ``needle``, or -1."""
+    var hl = haystack.byte_length()
+    var nl = needle.byte_length()
+    if nl == 0 or hl < nl:
+        return -1
+    var hp = haystack.unsafe_ptr()
+    var np = needle.unsafe_ptr()
+    var last = hl - nl
+    for i in range(last + 1):
+        var matched = True
+        for j in range(nl):
+            if hp[i + j] != np[j]:
+                matched = False
+                break
+        if matched:
+            return i
+    return -1

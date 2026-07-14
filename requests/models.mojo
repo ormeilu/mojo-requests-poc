@@ -29,8 +29,12 @@ struct Headers(Movable):
     def get(self, key: String, default: String) -> String:
         return self._data.get(_to_lower(key), default)
 
-    def contains(self, key: String) -> Bool:
-        return self._data.contains(_to_lower(key))
+    def contains(self, key: String) raises -> Bool:
+        var lowered = _to_lower(key)
+        for k in self._data:
+            if k == lowered:
+                return True
+        return False
 
     def items(self) -> _ItemsRef:
         return _ItemsRef(self._data)

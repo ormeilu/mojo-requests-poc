@@ -22,7 +22,7 @@ from scratch via libc FFI.
 ## Other roadmap items
 
 - [ ] **IPv6 support** — add a `sockaddr_in6` path alongside `sockaddr_in`.
-- [ ] **Redirects** — `allow_redirects` parameter; follow `Location` headers (3xx).
+- [x] **Redirects** — `allow_redirects` parameter; follow `Location` headers (3xx). Supports absolute, protocol-relative (`//host`), root-relative (`/path`), and relative redirects. 301/302/303 after POST → GET.
 - [ ] **Cookie jar persistence** — `Session` should persist `Set-Cookie` across requests.
 - [ ] **Streaming responses** — read body incrementally instead of buffering all into memory.
 - [ ] **Connection pooling / keep-alive** — reuse TCP connections across requests in a Session.
