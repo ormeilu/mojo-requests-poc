@@ -4,3 +4,7 @@
 
 # zcode session artifacts
 .zcode/
+
+# benchmark build artifacts
+benchmark/bench_mojo_requests
+benchmark/results.md

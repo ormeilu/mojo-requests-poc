@@ -22,6 +22,9 @@ pixi run mojo -I . tests/test_https.mojo   # HTTPS-specific tests
 
 # Run the demo (starts a local HTTP server for you to hit)
 pixi run demo
+
+# Benchmark against python requests + httpx (uses hyperfine)
+pixi run bench
 ```
 
 ## Usage
@@ -159,6 +162,47 @@ requests/
 `/usr/lib`, etc.) and loaded at runtime via `OwnedDLHandle` (dlopen). The `TLSConnection` wraps the
 already-connected raw socket: `SSL_CTX_new` → `SSL_new` → `SSL_set_fd` → `SSL_set_tlsext_host_name` (SNI)
 → `SSL_connect`. Certificate verification is enabled by default (`SSL_VERIFY_PEER` + system CA store).
+
+## Benchmark
+
+`pixi run bench` starts a local HTTP server and benchmarks sequential GET requests using
+[hyperfine](https://github.com/sharkdp/hyperfine) — comparing Python `requests`, Python `httpx`,
+and `mojo-requests` (both `mojo run` with compile, and a pre-built binary without).
+
+### Methodology
+
+- Each run issues **200 sequential GET requests** to a local `python3 -m http.server` (no network
+  variance).
+- All implementations use a **session/client** (keep-alive connection reuse where supported).
+- hyperfine: **3 warmup runs + 10 measured runs** per implementation.
+
+### System
+
+| | |
+|---|---|
+| **OS** | macOS 26.4.1 (build 25E253) |
+| **CPU** | Apple M1 — 8 cores (8 logical) |
+| **RAM** | 16 GB |
+| **Mojo** | 1.0.0b3.dev2026071306 |
+| **Python** | 3.14.6 |
+| **requests** | 2.34.2 |
+| **httpx** | 0.28.1 |
+| **hyperfine** | 1.20.0 |
+
+### Results (200 sequential GETs)
+
+| Command | Mean ± σ | Min | Max | Relative |
+|:---|---:|---:|---:|---:|
+| `mojo (pre-built)` | **76.6 ms ± 13.4 ms** | 63.4 ms | 109.9 ms | **1.00** |
+| `python httpx` | 280.8 ms ± 88.9 ms | 212.7 ms | 507.8 ms | 3.67× |
+| `python requests` | 282.3 ms ± 54.1 ms | 245.9 ms | 427.7 ms | 3.69× |
+| `mojo run (incl. compile)` | 1036.0 ms ± 20.0 ms | 1006.0 ms | 1064.0 ms | 13.52× |
+
+> mojo-requests (pre-built) is **~3.7× faster** than Python `requests` and `httpx`.
+> The `mojo run` row includes ~960 ms of compile time per invocation — use `mojo build` for
+> production (the pre-built binary is the fair comparison).
+
+Full results are exported to `benchmark/results.md` on each run.
 
 ## Limitations & roadmap
 
