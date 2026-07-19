@@ -9,6 +9,7 @@ from ._http import build_request, parse_response, ParsedResponse
 from ._net import TCPSocket
 from ._dns import resolve as _dns_resolve
 from ._tls import TLSConnection
+from ._cookies import CookieJar
 from .models import Response, Headers
 from .exceptions import request_exception
 
@@ -22,11 +23,13 @@ struct Session:
         var r = s.get("http://example.com")
     """
     var headers: Dict[String, String]
+    var cookies: CookieJar
 
     def __init__(out self):
         self.headers = {}
         self.headers["User-Agent"] = "mojo-requests/0.1"
         self.headers["Accept"] = "*/*"
+        self.cookies = CookieJar()
         # Warm up the DNS resolver: the first getaddrinfo call in a process can fail on some
         # systems (lazy resolver init). Doing a throwaway resolve here primes it for real use.
         try:
@@ -35,7 +38,7 @@ struct Session:
             pass
 
     def request(
-        self,
+        mut self,
         method: String,
         url: String,
         var params: Optional[Dict[String, String]] = None,
@@ -96,8 +99,7 @@ struct Session:
 
         raise request_exception("too many redirects (max 30)")
 
-    def _do_request(
-        self,
+    def _do_request(mut self,
         method: String,
         url: String,
         params: Optional[Dict[String, String]],
@@ -131,6 +133,11 @@ struct Session:
         if headers != None:
             for entry in headers.value().items():
                 merged[_to_lower(entry.key)] = entry.value
+
+        # Inject cookies from the session jar (if any), unless the caller set a Cookie header.
+        var cookie_str = self.cookies.cookie_header()
+        if cookie_str.byte_length() > 0 and not _has_key_ci(merged, "Cookie"):
+            merged["Cookie"] = cookie_str
 
         # Body.
         var body = String()
@@ -193,12 +200,17 @@ struct Session:
         if u.query.byte_length() > 0:
             final_url = final_url + "?" + u.query
 
-        return _build_response(parsed^, final_url)
+        var resp = _build_response(parsed^, final_url)
+
+        # Extract Set-Cookie headers into the session jar.
+        self.cookies.extract_from_headers(resp.headers, host)
+
+        return resp^
 
     # --- Convenience method shortcuts ---
 
     def get(
-        self, url: String, var params: Optional[Dict[String, String]] = None,
+        mut self, url: String, var params: Optional[Dict[String, String]] = None,
         headers: Optional[Dict[String, String]] = None,
         timeout: Optional[Float64] = None,
         allow_redirects: Bool = True,
@@ -206,7 +218,7 @@ struct Session:
         return self.request("GET", url, params=params^, headers=headers, timeout=timeout, allow_redirects=allow_redirects)
 
     def post(
-        self, url: String, data: Optional[String] = None, json: Optional[String] = None,
+        mut self, url: String, data: Optional[String] = None, json: Optional[String] = None,
         headers: Optional[Dict[String, String]] = None,
         timeout: Optional[Float64] = None,
         allow_redirects: Bool = True,
@@ -214,7 +226,7 @@ struct Session:
         return self.request("POST", url, headers=headers, data=data, json=json, timeout=timeout, allow_redirects=allow_redirects)
 
     def put(
-        self, url: String, data: Optional[String] = None, json: Optional[String] = None,
+        mut self, url: String, data: Optional[String] = None, json: Optional[String] = None,
         headers: Optional[Dict[String, String]] = None,
         timeout: Optional[Float64] = None,
         allow_redirects: Bool = True,
@@ -222,7 +234,7 @@ struct Session:
         return self.request("PUT", url, headers=headers, data=data, json=json, timeout=timeout, allow_redirects=allow_redirects)
 
     def patch(
-        self, url: String, data: Optional[String] = None, json: Optional[String] = None,
+        mut self, url: String, data: Optional[String] = None, json: Optional[String] = None,
         headers: Optional[Dict[String, String]] = None,
         timeout: Optional[Float64] = None,
         allow_redirects: Bool = True,
@@ -230,21 +242,21 @@ struct Session:
         return self.request("PATCH", url, headers=headers, data=data, json=json, timeout=timeout, allow_redirects=allow_redirects)
 
     def delete(
-        self, url: String, headers: Optional[Dict[String, String]] = None,
+        mut self, url: String, headers: Optional[Dict[String, String]] = None,
         timeout: Optional[Float64] = None,
         allow_redirects: Bool = True,
     ) raises -> Response:
         return self.request("DELETE", url, headers=headers, timeout=timeout, allow_redirects=allow_redirects)
 
     def head(
-        self, url: String, headers: Optional[Dict[String, String]] = None,
+        mut self, url: String, headers: Optional[Dict[String, String]] = None,
         timeout: Optional[Float64] = None,
         allow_redirects: Bool = True,
     ) raises -> Response:
         return self.request("HEAD", url, headers=headers, timeout=timeout, allow_redirects=allow_redirects)
 
     def options(
-        self, url: String, headers: Optional[Dict[String, String]] = None,
+        mut self, url: String, headers: Optional[Dict[String, String]] = None,
         timeout: Optional[Float64] = None,
         allow_redirects: Bool = True,
     ) raises -> Response:

@@ -23,7 +23,7 @@ from scratch via libc FFI.
 
 - [ ] **IPv6 support** — add a `sockaddr_in6` path alongside `sockaddr_in`.
 - [x] **Redirects** — `allow_redirects` parameter; follow `Location` headers (3xx). Supports absolute, protocol-relative (`//host`), root-relative (`/path`), and relative redirects. 301/302/303 after POST → GET.
-- [ ] **Cookie jar persistence** — `Session` should persist `Set-Cookie` across requests.
+- [x] **Cookie jar persistence** — `Session` persists `Set-Cookie` across requests and sends them back as a `Cookie` header. Minimal v1 (parses name=value; ignores Path/Domain/Expires attributes).
 - [ ] **Streaming responses** — read body incrementally instead of buffering all into memory.
 - [ ] **Connection pooling / keep-alive** — reuse TCP connections across requests in a Session.
 - [ ] **Proxy support** — `proxies` parameter (HTTP/HTTPS proxy tunneling).
