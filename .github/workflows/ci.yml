@@ -3,10 +3,9 @@
 # Two jobs, both running on a matrix of macOS (osx-arm64) and Linux (linux-64) to match the
 # platforms declared in pixi.toml:
 #   - lint:   `mojo format` check — fails if any source diverges from canonical formatting.
-#   - test:   installs OpenSSL on Linux, runs all three test suites (HTTP, HTTPS, streaming).
-#
-# The streaming + HTTPS suites hit the network (example.com); GitHub-hosted runners have
-# outbound internet, so those run as part of the standard test step.
+#   - test:   installs OpenSSL on Linux, starts a local HTTP+HTTPS test server, then runs all
+#             three test suites (HTTP, HTTPS, streaming). The streaming + HTTPS live tests hit
+#             the local server (no external network dependency).
 
 name: CI
 
@@ -59,11 +58,34 @@ jobs:
         with:
           manifest-path: pixi.toml
 
+      - name: Start local test server (HTTP + HTTPS)
+        # Runs tests/server.py in the background; waits for the ports to accept connections
+        # before proceeding. Parses its stdout for BASE_URL / HTTPS_BASE_URL / cert path.
+        run: |
+          pixi run python tests/server.py > /tmp/server.log 2>&1 &
+          echo $! > /tmp/server.pid
+          # Wait up to 20s for the server to come up.
+          for _ in $(seq 1 40); do
+            if grep -q "^HTTPS_BASE_URL=" /tmp/server.log; then break; fi
+            sleep 0.5
+          done
+          cat /tmp/server.log
+          grep "^BASE_URL="       /tmp/server.log >> "$GITHUB_ENV"
+          grep "^HTTPS_BASE_URL=" /tmp/server.log >> "$GITHUB_ENV"
+          echo "SSL_CERT_FILE=$(grep '^ROOT=' /tmp/server.log | cut -d= -f2)/cert.pem" >> "$GITHUB_ENV"
+
       - name: Core tests (URL parsing, framing, JSON)
         run: pixi run test
 
       - name: HTTPS tests
         run: pixi run test-https
 
-      - name: Streaming tests (live network)
+      - name: Streaming tests (local server)
         run: pixi run test-streaming
+
+      - name: Stop local test server
+        if: always()
+        run: |
+          if [ -f /tmp/server.pid ]; then
+            kill "$(cat /tmp/server.pid)" 2>/dev/null || true
+          fi

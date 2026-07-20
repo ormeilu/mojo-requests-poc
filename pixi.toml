@@ -10,16 +10,21 @@ version = "0.1.0"
 test = "mojo -I . tests/test_requests.mojo"
 # Run the HTTPS-specific test suite
 test-https = "mojo -I . tests/test_https.mojo"
-# Run the streaming test suite (stream=True, iter_content — includes live HTTP/HTTPS tests)
+# Run the streaming test suite (stream=True, iter_content — reads BASE_URL / HTTPS_BASE_URL
+# / SSL_CERT_FILE from env; falls back to example.com when unset)
 test-streaming = "mojo -I . tests/test_streaming.mojo"
 # Run all unit + live tests
 test-all = "mojo -I . tests/test_requests.mojo && mojo -I . tests/test_https.mojo && mojo -I . tests/test_streaming.mojo"
-# Run the demo (optionally start a local server first: python3 -m http.server 18090)
+# Run the demo (optionally start a local server first: pixi run server)
 demo = "mojo -I . examples/demo.mojo"
 # Run benchmarks: python requests vs httpx vs mojo-requests (hyperfine)
 bench = "bash benchmark/run.sh"
 # Format-check: fails if any Mojo source diverges from `mojo format`. Used by CI.
 fmt-check = "mojo format --quiet requests/ tests/ examples/ && git diff --exit-code --name-only requests/ tests/ examples/"
+# Start a local HTTP+HTTPS test server for the streaming/HTTPS live tests.
+# Prints BASE_URL / HTTPS_BASE_URL / ROOT (cert path) on stdout; set SSL_CERT_FILE=$ROOT/cert.pem
+# before invoking requests to trust the self-signed cert.
+server = "python tests/server.py"
 
 [dependencies]
 mojo = ">=1.0.0b3.dev2026071921,<2"

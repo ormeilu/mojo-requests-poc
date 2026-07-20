@@ -2,13 +2,18 @@
 #
 # Covers: StreamingConn construction + read_chunk behavior on a synthetic buffer,
 # the iter_content() API on a non-streaming Response, and live streaming against
-# a real HTTP server (example.com) over both HTTP and HTTPS.
+# a real HTTP server.
+#
+# Live tests read BASE_URL / HTTPS_BASE_URL from the environment (set by the
+# local test server tests/server.py and the CI workflow). When unset, they fall
+# back to example.com so manual ``pixi run test-streaming`` still works without
+# a local server.
 #
 # Run with: pixi run mojo -I . tests/test_streaming.mojo
 
 from std.testing import assert_equal, assert_true, assert_false, TestSuite
 from std.memory import OwnedPointer
-from std.ffi import c_int, OwnedDLHandle
+from std.ffi import c_int, OwnedDLHandle, external_call
 from requests.session import Session
 from requests.models import Response, Headers
 from requests._streaming import StreamingConn
@@ -29,6 +34,35 @@ def _bytes_from_string(s: String) -> List[UInt8]:
 def _byte(c: String) -> UInt8:
     """First byte of a 1-char ASCII string as UInt8."""
     return UInt8(c.unsafe_ptr()[0])
+
+
+def _getenv(name: String) -> String:
+    """Read an environment variable via libc getenv (returns "" if unset)."""
+    var ptr = external_call["getenv", UnsafePointer[UInt8, MutUntrackedOrigin]](
+        name.unsafe_ptr()
+    )
+    if Int(ptr) == 0:
+        return ""
+    var out = String()
+    var i = 0
+    while ptr[i] != 0:
+        out += String(Codepoint(unsafe_unchecked_codepoint=UInt32(ptr[i])))
+        i += 1
+    return out
+
+
+def _http_base() -> String:
+    var v = _getenv("BASE_URL")
+    if v.byte_length() > 0:
+        return v
+    return "http://example.com"
+
+
+def _https_base() -> String:
+    var v = _getenv("HTTPS_BASE_URL")
+    if v.byte_length() > 0:
+        return v
+    return "https://example.com"
 
 
 def _contains(haystack: String, needle: String) -> Bool:
@@ -124,27 +158,16 @@ def test_response_is_streaming_flag() raises:
 
 def test_live_stream_http() raises:
     var s = Session()
-    var r = s.get("http://example.com/", stream=True)
+    var r = s.get(_http_base() + "/large.bin", stream=True)
     assert_equal(r.status_code, 200)
     assert_true(r.is_streaming())
     var total = 0
-    var saw_example = False
     var chunks_seen = 0
     for chunk in r.iter_content(64):
         chunks_seen += 1
         total += len(chunk)
-        # Build a printable ASCII string from the chunk to look for "Example".
-        var sb = String()
-        for b in chunk:
-            if b >= 32 and b < 127:
-                sb += String(Codepoint(unsafe_unchecked_codepoint=UInt32(b)))
-            else:
-                sb += " "
-        if _contains(sb, "Example"):
-            saw_example = True
     assert_true(total > 0, "streamed body should not be empty")
     assert_true(chunks_seen > 1, "should have received more than one chunk")
-    assert_true(saw_example, "body should contain 'Example'")
 
 
 # --- live: stream a real HTTPS response ---
@@ -152,7 +175,7 @@ def test_live_stream_http() raises:
 
 def test_live_stream_https() raises:
     var s = Session()
-    var r = s.get("https://example.com/", stream=True)
+    var r = s.get(_https_base() + "/", stream=True)
     assert_equal(r.status_code, 200)
     assert_true(r.is_streaming())
     var total = 0
@@ -166,13 +189,12 @@ def test_live_stream_https() raises:
 
 def test_live_stream_text_drains() raises:
     var s = Session()
-    var r = s.get("http://example.com/", stream=True)
+    var r = s.get(_http_base() + "/large.bin", stream=True)
     assert_true(r.is_streaming())
     var txt = r.text()
     # After text() drains, the stream is consumed.
     assert_false(r.is_streaming())
     assert_true(txt.byte_length() > 0)
-    assert_true(_contains(txt, "Example"))
 
 
 # --- runner ---
