@@ -52,7 +52,9 @@ def test_ssl_error_kind() raises:
 def test_ssl_error_message() raises:
     var err = ssl_error("cert invalid")
     var s = String(err)
-    assert_true(s == "SSLError: cert invalid", "ssl_error message should be prefixed")
+    assert_true(
+        s == "SSLError: cert invalid", "ssl_error message should be prefixed"
+    )
 
 
 # --- TLS layer importable (compile-time check that _tls.mojo is well-formed) ---
@@ -62,6 +64,7 @@ def test_tls_connection_importable() raises:
     # If _tls.mojo compiled and TLSConnection is constructible, TLS support is wired up.
     # We don't perform a live handshake here (that needs network); this is a smoke test.
     from requests._tls import TLSConnection
+
     _ = TLSConnection()
     assert_true(True, "TLSConnection constructed")
 

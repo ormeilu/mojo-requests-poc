@@ -15,6 +15,7 @@ struct Headers(Movable):
 
     Keys are stored lowercased; lookups are case-insensitive. ``get`` returns a default if absent.
     """
+
     var _data: Dict[String, String]
 
     def __init__(out self):
@@ -53,8 +54,11 @@ struct Headers(Movable):
 
 
 struct _ItemsRef:
-    """Helper exposing iteration over header entries (workaround for returning iterables)."""
+    """Helper exposing iteration over header entries (workaround for returning iterables).
+    """
+
     var _data: Dict[String, String]
+
     def __init__(out self, data: Dict[String, String]):
         self._data = data
 
@@ -65,6 +69,7 @@ struct Response(Movable, Writable):
     Fields: ``status_code``, ``headers``, ``content``, ``url``. Computed: ``text``, ``ok``, ``json()``.
     When created with ``stream=True``, carries a live connection for incremental body reads.
     """
+
     var status_code: Int
     var reason: String
     var headers: Headers
@@ -120,10 +125,13 @@ struct Response(Movable, Writable):
         return self.status_code < 400
 
     def is_streaming(self) -> Bool:
-        """True if this Response was created with stream=True (body not yet read)."""
+        """True if this Response was created with stream=True (body not yet read).
+        """
         return self._stream_conn != None
 
-    def iter_content(mut self, chunk_size: Int = 512) raises -> List[List[UInt8]]:
+    def iter_content(
+        mut self, chunk_size: Int = 512
+    ) raises -> List[List[UInt8]]:
         """Iterate body chunks. Only valid for streaming responses (stream=True).
 
         Returns a List of byte chunks. Drains the stream; calling twice returns an empty list.
@@ -151,7 +159,8 @@ struct Response(Movable, Writable):
         return chunks^
 
     def _drain_stream(mut self) raises:
-        """Read the entire streaming body into self.content (used by text()/content access)."""
+        """Read the entire streaming body into self.content (used by text()/content access).
+        """
         if self._stream_conn == None:
             return
         while True:
@@ -163,13 +172,15 @@ struct Response(Movable, Writable):
         self._stream_conn = None
 
     def text(mut self) raises -> String:
-        """Decode the body to a String using ``encoding`` (lossy UTF-8). Drains stream if streaming."""
+        """Decode the body to a String using ``encoding`` (lossy UTF-8). Drains stream if streaming.
+        """
         if self._stream_conn != None:
             self._drain_stream()
         return _bytes_to_string(self.content)
 
     def json(mut self) raises -> JSONValue:
-        """Parse the body as JSON. Raises request_exception on malformed JSON."""
+        """Parse the body as JSON. Raises request_exception on malformed JSON.
+        """
         return parse_json(self.text())
 
     def raise_for_status(self) raises:

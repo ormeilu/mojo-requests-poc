@@ -29,6 +29,7 @@ struct SockAddrIn:
     - ``sin_addr`` is a 32-bit network-order address
     - ``sin_zero`` pads to 16 bytes total
     """
+
     var sin_family: UInt16
     var sin_port: UInt16
     var sin_addr: UInt32
@@ -38,6 +39,7 @@ struct SockAddrIn:
 @fieldwise_init
 struct Timeval:
     """libc ``struct timeval { long tv_sec; long tv_usec; }``."""
+
     var tv_sec: Int64
     var tv_usec: Int64
 
@@ -53,6 +55,7 @@ struct TCPSocket:
     Use ``connect`` to create, then ``send_all`` / ``recv_all`` for full-duplex I/O.
     The socket is closed in ``__del__``; you may also call ``close`` explicitly.
     """
+
     var fd: c_int
     var closed: Bool
 
@@ -67,7 +70,9 @@ struct TCPSocket:
         """The raw socket file descriptor (for binding to a TLS layer)."""
         return self.fd
 
-    def connect(mut self, host: String, port: Int, timeout: Optional[Float64] = None) raises:
+    def connect(
+        mut self, host: String, port: Int, timeout: Optional[Float64] = None
+    ) raises:
         """Open a TCP connection to ``host:port``.
 
         ``host`` may be a dotted-decimal IP or a hostname (resolved via ``_dns``).
@@ -76,7 +81,9 @@ struct TCPSocket:
         var addr = _dns_resolve(host)
         self._connect_addr(addr, port, timeout, host)
 
-    def connect_ip(mut self, addr: UInt32, port: Int, timeout: Optional[Float64] = None) raises:
+    def connect_ip(
+        mut self, addr: UInt32, port: Int, timeout: Optional[Float64] = None
+    ) raises:
         """Open a TCP connection to a pre-resolved IPv4 address (host byte order).
 
         Use this when DNS was already resolved by the caller (avoids re-resolution).
@@ -84,9 +91,15 @@ struct TCPSocket:
         self._connect_addr(addr, port, timeout, String())
 
     def _connect_addr(
-        mut self, addr: UInt32, port: Int, timeout: Optional[Float64], host_label: String
+        mut self,
+        addr: UInt32,
+        port: Int,
+        timeout: Optional[Float64],
+        host_label: String,
     ) raises:
-        var raw_fd = external_call["socket", c_int](AF_INET, SOCK_STREAM, c_int(0))
+        var raw_fd = external_call["socket", c_int](
+            AF_INET, SOCK_STREAM, c_int(0)
+        )
         if raw_fd < c_int(0):
             raise connection_error("socket() failed")
         self.fd = raw_fd
@@ -107,13 +120,19 @@ struct TCPSocket:
         if rc < c_int(0):
             self._raw_close()
             if host_label.byte_length() > 0:
-                raise connection_error(String(t"connect() to {host_label}:{String(port)} failed"))
-            raise connection_error(String(t"connect() to port {String(port)} failed"))
+                raise connection_error(
+                    String(t"connect() to {host_label}:{String(port)} failed")
+                )
+            raise connection_error(
+                String(t"connect() to port {String(port)} failed")
+            )
 
     def _set_timeouts(mut self, timeout_secs: Float64) raises:
         var tv = alloc[Timeval](1)
         tv[].tv_sec = Int64(timeout_secs)
-        tv[].tv_usec = Int64((timeout_secs - Float64(Int64(timeout_secs))) * 1_000_000.0)
+        tv[].tv_usec = Int64(
+            (timeout_secs - Float64(Int64(timeout_secs))) * 1_000_000.0
+        )
         var size = c_int(16)  # sizeof(struct timeval) on 64-bit
         _ = external_call["setsockopt", c_int](
             self.fd, SOL_SOCKET, SO_RCVTIMEO, tv, size
@@ -159,7 +178,9 @@ struct TCPSocket:
         var all: List[UInt8] = []
         var buf = alloc[UInt8](CHUNK_SIZE)
         while True:
-            var n = external_call["recv", c_int](self.fd, buf, c_int(CHUNK_SIZE), RECV_FLAGS)
+            var n = external_call["recv", c_int](
+                self.fd, buf, c_int(CHUNK_SIZE), RECV_FLAGS
+            )
             if n <= c_int(0):
                 break
             var count = Int(n)
@@ -172,12 +193,17 @@ struct TCPSocket:
         if not self.closed:
             self._raw_close()
 
-    def _recv_raw(mut self, buf: UnsafePointer[UInt8, MutUntrackedOrigin], max_bytes: Int) raises -> c_int:
+    def _recv_raw(
+        mut self, buf: UnsafePointer[UInt8, MutUntrackedOrigin], max_bytes: Int
+    ) raises -> c_int:
         """Single recv() call. Returns byte count, or <=0 on close/error."""
-        return external_call["recv", c_int](self.fd, buf, c_int(max_bytes), RECV_FLAGS)
+        return external_call["recv", c_int](
+            self.fd, buf, c_int(max_bytes), RECV_FLAGS
+        )
 
     def _disown(mut self):
-        """Mark this socket as not owning its fd (so __del__/close won't close it). Used for streaming."""
+        """Mark this socket as not owning its fd (so __del__/close won't close it). Used for streaming.
+        """
         self.closed = True
         self.fd = c_int(-1)
 

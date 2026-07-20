@@ -58,6 +58,7 @@ def _has_key_ci(d: Dict[String, String], key: String) -> Bool:
 @fieldwise_init
 struct ParsedHeaders:
     """Just the status line + headers (no body). Returned by parse_headers()."""
+
     var status_code: Int
     var reason: String
     var headers: Dict[String, String]
@@ -79,15 +80,17 @@ def parse_headers(head: String) raises -> ParsedHeaders:
         raise request_exception(String(t"malformed status line: {status_line}"))
     var code = _parse_int_local(String(status_parts[1]))
     if code == None:
-        raise request_exception(String(t"malformed status code: {status_parts[1]}"))
+        raise request_exception(
+            String(t"malformed status code: {status_parts[1]}")
+        )
 
     var reason = String()
     var sp_pos = _find(status_line, " ")
     if sp_pos >= 0:
-        var after_ver = String(status_line[byte=sp_pos + 1 :])
+        var after_ver = String(status_line[byte = sp_pos + 1 :])
         var sp2 = _find(after_ver, " ")
         if sp2 >= 0:
-            reason = String(after_ver[byte=sp2 + 1 :])
+            reason = String(after_ver[byte = sp2 + 1 :])
 
     var headers: Dict[String, String] = {}
     var i = 1
@@ -101,7 +104,7 @@ def parse_headers(head: String) raises -> ParsedHeaders:
             i += 1
             continue
         var name = _to_lower(String(line[byte=0:colon]))
-        var value = String(line[byte=colon + 1 :])
+        var value = String(line[byte = colon + 1 :])
         value = _strip(value)
         headers[name] = value
         i += 1
@@ -115,6 +118,7 @@ struct ParsedResponse:
 
     body is heap-allocated so the whole struct can be cheaply moved without partial-move restrictions.
     """
+
     var status_code: Int
     var reason: String
     var headers: Dict[String, String]
@@ -153,7 +157,9 @@ def parse_response(raw: List[UInt8]) raises -> ParsedResponse:
     return _build_parsed(ph^, raw, body_start)
 
 
-def _build_parsed(var ph: ParsedHeaders, raw: List[UInt8], body_start: Int) raises -> ParsedResponse:
+def _build_parsed(
+    var ph: ParsedHeaders, raw: List[UInt8], body_start: Int
+) raises -> ParsedResponse:
     """Build a ParsedResponse from owned headers.
 
     Copies header entries into a fresh Dict (Dict is non-copyable and can't be moved out of a struct
@@ -164,7 +170,7 @@ def _build_parsed(var ph: ParsedHeaders, raw: List[UInt8], body_start: Int) rais
     # Read framing info as values, then copy headers into a fresh dict.
     var te = ph.headers.get("transfer-encoding", String(""))
     var cl_str = ph.headers.get("content-length", String(""))
-    var chunked = (_to_lower(te) == "chunked")
+    var chunked = _to_lower(te) == "chunked"
     var cl = _parse_int_local(cl_str)
     var headers_copy: Dict[String, String] = {}
     for entry in ph.headers.items():
@@ -174,9 +180,13 @@ def _build_parsed(var ph: ParsedHeaders, raw: List[UInt8], body_start: Int) rais
 
 
 def _extract_body(
-    raw: List[UInt8], body_start: Int, chunked: Bool, content_length: Optional[Int]
+    raw: List[UInt8],
+    body_start: Int,
+    chunked: Bool,
+    content_length: Optional[Int],
 ) raises -> List[UInt8]:
-    """Extract the response body. ``chunked`` and ``content_length`` are pre-parsed framing values."""
+    """Extract the response body. ``chunked`` and ``content_length`` are pre-parsed framing values.
+    """
     if chunked:
         return _dechunk(raw, body_start)
 
@@ -233,7 +243,8 @@ struct _LineRead:
 
 
 def _read_line(raw: List[UInt8], start: Int) -> _LineRead:
-    """Read bytes until \n, not including the trailing \r\n. Returns the line and the position after \n."""
+    """Read bytes until \n, not including the trailing \r\n. Returns the line and the position after \n.
+    """
     var line = List[UInt8]()
     var pos = start
     var total = len(raw)

@@ -10,12 +10,13 @@ from .exceptions import request_exception
 from std.memory import OwnedPointer
 
 
-struct JSONValue(Movable, Copyable, Writable):
+struct JSONValue(Copyable, Movable, Writable):
     """A node in a parsed JSON document.
 
     ``kind`` is one of: "object", "array", "string", "int", "float", "bool", "null".
     Containers are heap-allocated behind OwnedPointer so the recursive type has a fixed layout. Copyable via deep copy.
     """
+
     var kind: String
     var _str: String
     var _int: Int
@@ -63,29 +64,39 @@ struct JSONValue(Movable, Copyable, Writable):
 
     def as_string(self) raises -> String:
         if self.kind != "string":
-            raise request_exception(String(t"JSON value is not a string (was {self.kind})"))
+            raise request_exception(
+                String(t"JSON value is not a string (was {self.kind})")
+            )
         return self._str
 
     def as_int(self) raises -> Int:
         if self.kind != "int":
-            raise request_exception(String(t"JSON value is not an int (was {self.kind})"))
+            raise request_exception(
+                String(t"JSON value is not an int (was {self.kind})")
+            )
         return self._int
 
     def as_float(self) raises -> Float64:
         if self.kind != "float" and self.kind != "int":
-            raise request_exception(String(t"JSON value is not a float (was {self.kind})"))
+            raise request_exception(
+                String(t"JSON value is not a float (was {self.kind})")
+            )
         if self.kind == "int":
             return Float64(self._int)
         return self._float
 
     def as_bool(self) raises -> Bool:
         if self.kind != "bool":
-            raise request_exception(String(t"JSON value is not a bool (was {self.kind})"))
+            raise request_exception(
+                String(t"JSON value is not a bool (was {self.kind})")
+            )
         return self._bool
 
     def __getitem__(self, key: String) raises -> JSONValue:
         if self.kind != "object":
-            raise request_exception(String(t"JSON value is not an object (was {self.kind})"))
+            raise request_exception(
+                String(t"JSON value is not an object (was {self.kind})")
+            )
         return self._object[][key].copy()
 
     def get(self, key: String, default: JSONValue) raises -> JSONValue:
@@ -97,9 +108,13 @@ struct JSONValue(Movable, Copyable, Writable):
 
     def __getitem__(self, index: Int) raises -> JSONValue:
         if self.kind != "array":
-            raise request_exception(String(t"JSON value is not an array (was {self.kind})"))
+            raise request_exception(
+                String(t"JSON value is not an array (was {self.kind})")
+            )
         if index < 0 or index >= len(self._array[]):
-            raise request_exception(String(t"JSON array index out of range: {index}"))
+            raise request_exception(
+                String(t"JSON array index out of range: {index}")
+            )
         return self._array[][index].copy()
 
     def len(self) -> Int:
@@ -114,7 +129,7 @@ struct JSONValue(Movable, Copyable, Writable):
 
     def write_to(self, mut writer: Some[Writer]):
         if self.kind == "string":
-            writer.write("\"", self._str, "\"")
+            writer.write('"', self._str, '"')
         elif self.kind == "int":
             writer.write(self._int)
         elif self.kind == "float":
@@ -132,7 +147,8 @@ struct JSONValue(Movable, Copyable, Writable):
 
 
 def parse_json(s: String) raises -> JSONValue:
-    """Parse a JSON document string into a JSONValue. Raises request_exception on malformed input."""
+    """Parse a JSON document string into a JSONValue. Raises request_exception on malformed input.
+    """
     var p = _Parser(s)
     p.skip_ws()
     var v = p.parse_value()
@@ -186,7 +202,12 @@ struct _Parser:
             return self._parse_number_or_null()
         if (b >= 0x30 and b <= 0x39) or b == 0x2B:  # digit or '+'
             return self._parse_number_or_null()
-        raise request_exception(String(t"unexpected character in JSON: {Codepoint(unsafe_unchecked_codepoint=UInt32(b))}"))
+        raise request_exception(
+            String(
+                t"unexpected character in JSON:"
+                t" {Codepoint(unsafe_unchecked_codepoint=UInt32(b))}"
+            )
+        )
 
     def _parse_object(mut self) raises -> JSONValue:
         self.pos += 1  # consume '{'
@@ -248,34 +269,50 @@ struct _Parser:
             if b == 0x5C:  # backslash
                 self.pos += 1
                 if self.pos >= self.n:
-                    raise request_exception("unterminated escape in JSON string")
+                    raise request_exception(
+                        "unterminated escape in JSON string"
+                    )
                 var e = sp[self.pos]
                 self.pos += 1
                 if e == 0x22:
-                    out += "\""
+                    out += '"'
                 elif e == 0x5C:
                     out += "\\"
                 elif e == 0x2F:
                     out += "/"
                 elif e == 0x62:  # 'b'
-                    out += String(Codepoint(unsafe_unchecked_codepoint=UInt32(0x08)))
+                    out += String(
+                        Codepoint(unsafe_unchecked_codepoint=UInt32(0x08))
+                    )
                 elif e == 0x66:  # 'f'
-                    out += String(Codepoint(unsafe_unchecked_codepoint=UInt32(0x0C)))
+                    out += String(
+                        Codepoint(unsafe_unchecked_codepoint=UInt32(0x0C))
+                    )
                 elif e == 0x72:  # 'r'
-                    out += String(Codepoint(unsafe_unchecked_codepoint=UInt32(0x0D)))
+                    out += String(
+                        Codepoint(unsafe_unchecked_codepoint=UInt32(0x0D))
+                    )
                 elif e == 0x6E:  # 'n'
-                    out += String(Codepoint(unsafe_unchecked_codepoint=UInt32(0x0A)))
+                    out += String(
+                        Codepoint(unsafe_unchecked_codepoint=UInt32(0x0A))
+                    )
                 elif e == 0x74:  # 't' — tab
-                    out += String(Codepoint(unsafe_unchecked_codepoint=UInt32(0x09)))
+                    out += String(
+                        Codepoint(unsafe_unchecked_codepoint=UInt32(0x09))
+                    )
                 elif e == 0x75:  # 'u' — unicode escape \uXXXX
                     if self.pos + 4 > self.n:
                         raise request_exception("bad \\uXXXX escape")
-                    var hex = String(self.src[byte=self.pos : self.pos + 4])
+                    var hex = String(self.src[byte = self.pos : self.pos + 4])
                     self.pos += 4
                     var cp = _parse_hex4(hex)
                     if cp == None:
-                        raise request_exception(String(t"bad \\u escape: {hex}"))
-                    out += String(Codepoint(unsafe_unchecked_codepoint=UInt32(cp.value())))
+                        raise request_exception(
+                            String(t"bad \\u escape: {hex}")
+                        )
+                    out += String(
+                        Codepoint(unsafe_unchecked_codepoint=UInt32(cp.value()))
+                    )
                 else:
                     raise request_exception("invalid escape in JSON string")
             else:
@@ -285,13 +322,26 @@ struct _Parser:
 
     def _parse_literal(mut self) raises -> JSONValue:
         var sp = self.src.unsafe_ptr()
-        if self.pos + 4 <= self.n and sp[self.pos] == 0x74 and sp[self.pos + 1] == 0x72 and sp[self.pos + 2] == 0x75 and sp[self.pos + 3] == 0x65:
+        if (
+            self.pos + 4 <= self.n
+            and sp[self.pos] == 0x74
+            and sp[self.pos + 1] == 0x72
+            and sp[self.pos + 2] == 0x75
+            and sp[self.pos + 3] == 0x65
+        ):
             # "true"
             self.pos += 4
             var v = JSONValue("bool")
             v._bool = True
             return v^
-        if self.pos + 5 <= self.n and sp[self.pos] == 0x66 and sp[self.pos + 1] == 0x61 and sp[self.pos + 2] == 0x6C and sp[self.pos + 3] == 0x73 and sp[self.pos + 4] == 0x65:
+        if (
+            self.pos + 5 <= self.n
+            and sp[self.pos] == 0x66
+            and sp[self.pos + 1] == 0x61
+            and sp[self.pos + 2] == 0x6C
+            and sp[self.pos + 3] == 0x73
+            and sp[self.pos + 4] == 0x65
+        ):
             # "false"
             self.pos += 5
             var v = JSONValue("bool")
@@ -303,7 +353,12 @@ struct _Parser:
         var sp = self.src.unsafe_ptr()
         # "null"
         if sp[self.pos] == 0x6E:  # 'n'
-            if self.pos + 4 <= self.n and sp[self.pos + 1] == 0x75 and sp[self.pos + 2] == 0x6C and sp[self.pos + 3] == 0x6C:
+            if (
+                self.pos + 4 <= self.n
+                and sp[self.pos + 1] == 0x75
+                and sp[self.pos + 2] == 0x6C
+                and sp[self.pos + 3] == 0x6C
+            ):
                 self.pos += 4
                 return JSONValue("null")
             raise request_exception("invalid JSON literal (expected null)")
@@ -314,7 +369,7 @@ struct _Parser:
             self.pos += 1
         while self.pos < self.n:
             var b = sp[self.pos]
-            if (b >= 0x30 and b <= 0x39):
+            if b >= 0x30 and b <= 0x39:
                 self.pos += 1
             elif b == 0x2E:  # '.'
                 is_float = True
@@ -326,7 +381,7 @@ struct _Parser:
                 self.pos += 1
             else:
                 break
-        var num_str = String(self.src[byte=start : self.pos])
+        var num_str = String(self.src[byte = start : self.pos])
         if is_float:
             var v = JSONValue("float")
             v._float = _parse_float(num_str)

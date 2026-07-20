@@ -19,7 +19,17 @@ def request(
 ) raises -> Response:
     """Send an HTTP request and return a Response."""
     var s = Session()
-    return s.request(method, url, params=params^, headers=headers, data=data, json=json, timeout=timeout, allow_redirects=allow_redirects, stream=stream)
+    return s.request(
+        method,
+        url,
+        params=params^,
+        headers=headers,
+        data=data,
+        json=json,
+        timeout=timeout,
+        allow_redirects=allow_redirects,
+        stream=stream,
+    )
 
 
 def get(
@@ -32,7 +42,14 @@ def get(
 ) raises -> Response:
     """Send an HTTP GET request."""
     var s = Session()
-    return s.get(url, params=params^, headers=headers, timeout=timeout, allow_redirects=allow_redirects, stream=stream)
+    return s.get(
+        url,
+        params=params^,
+        headers=headers,
+        timeout=timeout,
+        allow_redirects=allow_redirects,
+        stream=stream,
+    )
 
 
 def post(

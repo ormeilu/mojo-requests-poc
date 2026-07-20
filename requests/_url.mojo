@@ -11,6 +11,7 @@ struct URL(Movable, Writable):
 
     Fields are all owned Strings. ``port`` defaults to 80 for http if absent.
     """
+
     var scheme: String
     var host: String
     var port: Int
@@ -27,20 +28,25 @@ struct URL(Movable, Writable):
         self.fragment = ""
 
     def request_target(self) -> String:
-        """The request target for the HTTP request line (path [+ '?' + query])."""
+        """The request target for the HTTP request line (path [+ '?' + query]).
+        """
         if self.query.byte_length() > 0:
             return self.path + "?" + self.query
         return self.path
 
     def origin(self) -> String:
         """``scheme://host[:port]`` (omits default ports 80/443)."""
-        if (self.scheme == "http" and self.port == 80) or (self.scheme == "https" and self.port == 443):
+        if (self.scheme == "http" and self.port == 80) or (
+            self.scheme == "https" and self.port == 443
+        ):
             return self.scheme + "://" + self.host
         return self.scheme + "://" + self.host + ":" + String(self.port)
 
     def host_header(self) -> String:
         """Host header value (host[:port] if non-default for the scheme)."""
-        if (self.scheme == "http" and self.port == 80) or (self.scheme == "https" and self.port == 443):
+        if (self.scheme == "http" and self.port == 80) or (
+            self.scheme == "https" and self.port == 443
+        ):
             return self.host
         return self.host + ":" + String(self.port)
 
@@ -59,11 +65,15 @@ def parse_url(raw: String) raises -> URL:
     # scheme://
     var sep = _find(s, "://")
     if sep < 0:
-        raise invalid_url_error(String(t"URL missing scheme (use http://): {raw}"))
+        raise invalid_url_error(
+            String(t"URL missing scheme (use http://): {raw}")
+        )
     u.scheme = _to_lower(String(s[byte=0:sep]))
 
     if u.scheme != "http" and u.scheme != "https":
-        raise unsupported_scheme_error(String(t"scheme '{u.scheme}' not supported (only http/https)"))
+        raise unsupported_scheme_error(
+            String(t"scheme '{u.scheme}' not supported (only http/https)")
+        )
 
     var rest_start = sep + 3  # skip "://"
     var rest = String(s[byte=rest_start:])
@@ -71,13 +81,13 @@ def parse_url(raw: String) raises -> URL:
     # fragment
     var frag_pos = _find(rest, "#")
     if frag_pos >= 0:
-        u.fragment = String(rest[byte=frag_pos + 1 :])
+        u.fragment = String(rest[byte = frag_pos + 1 :])
         rest = String(rest[byte=0:frag_pos])
 
     # query
     var q_pos = _find(rest, "?")
     if q_pos >= 0:
-        u.query = String(rest[byte=q_pos + 1 :])
+        u.query = String(rest[byte = q_pos + 1 :])
         rest = String(rest[byte=0:q_pos])
 
     # path
@@ -97,9 +107,13 @@ def parse_url(raw: String) raises -> URL:
     var colon = _find(authority, ":")
     if colon >= 0:
         u.host = String(authority[byte=0:colon])
-        var port_str = String(authority[byte=colon + 1 :])
+        var port_str = String(authority[byte = colon + 1 :])
         var parsed_port = _parse_int(port_str)
-        if parsed_port == None or parsed_port.value() < 1 or parsed_port.value() > 65535:
+        if (
+            parsed_port == None
+            or parsed_port.value() < 1
+            or parsed_port.value() > 65535
+        ):
             raise invalid_url_error(String(t"URL has invalid port: {port_str}"))
         u.port = parsed_port.value()
     else:
@@ -134,13 +148,20 @@ def url_encode(s: String) -> String:
             out += "+"
         else:
             out += "%"
-            out += String(Codepoint(unsafe_unchecked_codepoint=UInt32(hp[(b >> 4) & 0x0F])))
-            out += String(Codepoint(unsafe_unchecked_codepoint=UInt32(hp[b & 0x0F])))
+            out += String(
+                Codepoint(
+                    unsafe_unchecked_codepoint=UInt32(hp[(b >> 4) & 0x0F])
+                )
+            )
+            out += String(
+                Codepoint(unsafe_unchecked_codepoint=UInt32(hp[b & 0x0F]))
+            )
     return out
 
 
 def build_query_string(params: Dict[String, String]) -> String:
-    """Build a ``key=value&key=value`` query string from a dict, percent-encoding both sides."""
+    """Build a ``key=value&key=value`` query string from a dict, percent-encoding both sides.
+    """
     var parts: List[String] = []
     for entry in params.items():
         parts.append(url_encode(entry.key) + "=" + url_encode(entry.value))
@@ -164,7 +185,8 @@ def _is_unreserved(b: UInt8) -> Bool:
 
 
 def _find(haystack: String, needle: String) -> Int:
-    """Return the byte index of the first occurrence of ``needle`` in ``haystack``, or -1."""
+    """Return the byte index of the first occurrence of ``needle`` in ``haystack``, or -1.
+    """
     var hl = haystack.byte_length()
     var nl = needle.byte_length()
     if nl == 0 or hl < nl:
@@ -199,7 +221,8 @@ def _parse_int(s: String) -> Optional[Int]:
 
 
 def _to_lower(s: String) -> String:
-    """Lowercase an ASCII string (non-ASCII codepoints pass through unchanged)."""
+    """Lowercase an ASCII string (non-ASCII codepoints pass through unchanged).
+    """
     var out = String()
     for cp in s.codepoints():
         var i = Int(cp)

@@ -117,7 +117,10 @@ def test_build_post_request_sets_content_length() raises:
 
 
 def test_parse_response_content_length() raises:
-    var raw = _to_bytes("HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\nContent-Length: 5\r\n\r\nhello")
+    var raw = _to_bytes(
+        "HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\nContent-Length:"
+        " 5\r\n\r\nhello"
+    )
     var pr = parse_response(raw)
     assert_equal(pr.status_code, 200)
     assert_equal(pr.reason, "OK")
@@ -126,7 +129,10 @@ def test_parse_response_content_length() raises:
 
 
 def test_parse_response_chunked() raises:
-    var raw = _to_bytes("HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n5\r\nHello\r\n6\r\n World\r\n0\r\n\r\n")
+    var raw = _to_bytes(
+        "HTTP/1.1 200 OK\r\nTransfer-Encoding:"
+        " chunked\r\n\r\n5\r\nHello\r\n6\r\n World\r\n0\r\n\r\n"
+    )
     var pr = parse_response(raw)
     assert_equal(pr.status_code, 200)
     assert_equal(Int(len(pr.body[])), 11)
@@ -143,7 +149,7 @@ def test_parse_response_404() raises:
 
 
 def test_json_object() raises:
-    var j = parse_json("{\"name\":\"mojo\",\"ver\":1}")
+    var j = parse_json('{"name":"mojo","ver":1}')
     assert_equal(j["name"].as_string(), "mojo")
     assert_equal(j["ver"].as_int(), 1)
 
@@ -162,7 +168,7 @@ def test_json_types() raises:
 
 
 def test_json_nested() raises:
-    var j = parse_json("{\"a\":[{\"b\":2}]}")
+    var j = parse_json('{"a":[{"b":2}]}')
     assert_equal(j["a"][0]["b"].as_int(), 2)
 
 

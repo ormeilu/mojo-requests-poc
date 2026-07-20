@@ -13,6 +13,7 @@ struct CookieJar:
     Cookies are stored globally (not per-host) for simplicity. For a v1 client this matches
     Python requests' default Session cookie behavior closely enough for most use cases.
     """
+
     var _cookies: Dict[String, String]
 
     def __init__(out self):
@@ -34,14 +35,15 @@ struct CookieJar:
             if eq < 0:
                 continue
             var name = String(p[byte=0:eq])
-            var value = String(p[byte=eq + 1 :])
+            var value = String(p[byte = eq + 1 :])
             name = _strip(name)
             value = _strip(value)
             if name.byte_length() > 0:
                 self._cookies[name] = value
 
     def cookie_header(self) -> String:
-        """Build a 'name=value; name2=value2' string for the Cookie request header."""
+        """Build a 'name=value; name2=value2' string for the Cookie request header.
+        """
         if len(self._cookies) == 0:
             return String()
         var parts: List[String] = []

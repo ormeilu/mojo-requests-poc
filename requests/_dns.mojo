@@ -18,6 +18,7 @@ comptime AI_NUMERICHOST: c_int = 0x4  # macOS/Linux
 @fieldwise_init
 struct InAddr:
     """libc `struct in_addr { in_addr_t s_addr; }` — a 32-bit address."""
+
     var s_addr: UInt32
 
 
@@ -63,7 +64,8 @@ def resolve(host: String) raises -> UInt32:
 
 
 def _resolve_by_name(host: String) raises -> UInt32:
-    """Resolve a hostname via libc ``getaddrinfo`` (thread-safe, heap-allocated — unlike gethostbyname)."""
+    """Resolve a hostname via libc ``getaddrinfo`` (thread-safe, heap-allocated — unlike gethostbyname).
+    """
     var hints = alloc[AddrInfo](1)
     hints[].ai_flags = 0
     hints[].ai_family = AF_INET
@@ -85,20 +87,28 @@ def _resolve_by_name(host: String) raises -> UInt32:
     hints.free()
     if rc != c_int(0):
         result_addr.free()
-        raise connection_error(String(t"DNS resolution failed for host: {host}"))
+        raise connection_error(
+            String(t"DNS resolution failed for host: {host}")
+        )
 
     var first = result_addr[]
     result_addr.free()
     if Int(first) == 0:
-        raise connection_error(String(t"DNS returned no addresses for host: {host}"))
+        raise connection_error(
+            String(t"DNS returned no addresses for host: {host}")
+        )
 
     # ai_addr points to a sockaddr; for AF_INET it's a sockaddr_in. Reinterpret and read sin_addr.
     var ai_addr = first[].ai_addr
     if ai_addr == 0:
         _ = external_call["freeaddrinfo", NoneType](first)
-        raise connection_error(String(t"DNS entry has no address for host: {host}"))
+        raise connection_error(
+            String(t"DNS entry has no address for host: {host}")
+        )
 
-    var sockaddr_ptr = UnsafePointer[SockAddrIn, MutUntrackedOrigin](unsafe_from_address=Int(ai_addr))
+    var sockaddr_ptr = UnsafePointer[SockAddrIn, MutUntrackedOrigin](
+        unsafe_from_address=Int(ai_addr)
+    )
     var ip = sockaddr_ptr[].sin_addr
 
     _ = external_call["freeaddrinfo", NoneType](first)

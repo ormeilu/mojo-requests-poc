@@ -25,6 +25,7 @@ struct Session:
         s.headers["User-Agent"] = "myapp/1.0"
         var r = s.get("http://example.com")
     """
+
     var headers: Dict[String, String]
     var cookies: CookieJar
 
@@ -69,7 +70,16 @@ struct Session:
         var current_json = json
 
         # First request: consumes params (owned). Subsequent redirects pass None for params.
-        var resp = self._do_request(redirect_method, current_url, params^, headers, current_data, current_json, timeout, stream)
+        var resp = self._do_request(
+            redirect_method,
+            current_url,
+            params^,
+            headers,
+            current_data,
+            current_json,
+            timeout,
+            stream,
+        )
 
         comptime MAX_REDIRECTS = 30
         # Streaming responses are returned as-is (no redirect following; connection stays open).
@@ -94,7 +104,8 @@ struct Session:
 
             # 303 / 301/302 after POST → GET (matches Python requests behavior).
             if resp.status_code == 303 or (
-                (resp.status_code == 301 or resp.status_code == 302) and redirect_method == "POST"
+                (resp.status_code == 301 or resp.status_code == 302)
+                and redirect_method == "POST"
             ):
                 redirect_method = "GET"
                 current_data = None
@@ -102,11 +113,21 @@ struct Session:
 
             # Issue the next request (no params on redirects; redirects never stream).
             var none_params: Optional[Dict[String, String]] = None
-            resp = self._do_request(redirect_method, current_url, none_params^, headers, current_data, current_json, timeout, False)
+            resp = self._do_request(
+                redirect_method,
+                current_url,
+                none_params^,
+                headers,
+                current_data,
+                current_json,
+                timeout,
+                False,
+            )
 
         raise request_exception("too many redirects (max 30)")
 
-    def _do_request(mut self,
+    def _do_request(
+        mut self,
         method: String,
         url: String,
         params: Optional[Dict[String, String]],
@@ -173,7 +194,7 @@ struct Session:
         # Connect, send. Branch on scheme: https wraps the TCP socket in TLS.
         var sock = TCPSocket()
         var tls = TLSConnection()
-        var is_https = (scheme == "https")
+        var is_https = scheme == "https"
         var connect_err = String()
         var connected = False
         try:
@@ -251,9 +272,9 @@ struct Session:
         var term_found = False
         var tmp = alloc[UInt8](8192)
         while not term_found:
-            var n = (
-                tls._ssl_read_raw(tmp, 8192) if is_https else sock._recv_raw(tmp, 8192)
-            )
+            var n = tls._ssl_read_raw(
+                tmp, 8192
+            ) if is_https else sock._recv_raw(tmp, 8192)
             if n > c_int(0):
                 var count = Int(n)
                 for i in range(count):
@@ -284,7 +305,7 @@ struct Session:
         # Read framing values, then copy headers (Dict can't be moved out of a struct field).
         var te = ph.headers.get("transfer-encoding", String(""))
         var cl_str = ph.headers.get("content-length", String(""))
-        var chunked = (_to_lower(te) == "chunked")
+        var chunked = _to_lower(te) == "chunked"
         var cl = _parse_content_length(cl_str)
         var hdrs = Headers()
         for entry in ph.headers.items():
@@ -295,7 +316,9 @@ struct Session:
 
         # Build the StreamingConn. It takes ownership of the socket fd + TLS handle.
         var fd = sock.fd_value()
-        var ssl_ptr = tls._steal_ssl()  # transfer SSL* out of TLSConnection (prevents its close)
+        var ssl_ptr = (
+            tls._steal_ssl()
+        )  # transfer SSL* out of TLSConnection (prevents its close)
         var libssl_handle = tls._steal_libssl()  # transfer the libssl handle
         # Mark sock/tls as no longer owning the connection so their destructors don't double-close.
         sock._disown()
@@ -304,66 +327,137 @@ struct Session:
         var content_length = -1
         if cl != None:
             content_length = cl.value()
-        var conn = StreamingConn(fd, libssl_handle^, ssl_ptr^, leftover^, content_length, chunked)
+        var conn = StreamingConn(
+            fd, libssl_handle^, ssl_ptr^, leftover^, content_length, chunked
+        )
         var conn_ptr = OwnedPointer[StreamingConn](conn^)
 
-        return Response(status_code, reason, hdrs^, List[UInt8](), final_url, conn_ptr^)
+        return Response(
+            status_code, reason, hdrs^, List[UInt8](), final_url, conn_ptr^
+        )
 
     # --- Convenience method shortcuts ---
 
     def get(
-        mut self, url: String, var params: Optional[Dict[String, String]] = None,
+        mut self,
+        url: String,
+        var params: Optional[Dict[String, String]] = None,
         headers: Optional[Dict[String, String]] = None,
         timeout: Optional[Float64] = None,
         allow_redirects: Bool = True,
         stream: Bool = False,
     ) raises -> Response:
-        return self.request("GET", url, params=params^, headers=headers, timeout=timeout, allow_redirects=allow_redirects, stream=stream)
+        return self.request(
+            "GET",
+            url,
+            params=params^,
+            headers=headers,
+            timeout=timeout,
+            allow_redirects=allow_redirects,
+            stream=stream,
+        )
 
     def post(
-        mut self, url: String, data: Optional[String] = None, json: Optional[String] = None,
+        mut self,
+        url: String,
+        data: Optional[String] = None,
+        json: Optional[String] = None,
         headers: Optional[Dict[String, String]] = None,
         timeout: Optional[Float64] = None,
         allow_redirects: Bool = True,
     ) raises -> Response:
-        return self.request("POST", url, headers=headers, data=data, json=json, timeout=timeout, allow_redirects=allow_redirects)
+        return self.request(
+            "POST",
+            url,
+            headers=headers,
+            data=data,
+            json=json,
+            timeout=timeout,
+            allow_redirects=allow_redirects,
+        )
 
     def put(
-        mut self, url: String, data: Optional[String] = None, json: Optional[String] = None,
+        mut self,
+        url: String,
+        data: Optional[String] = None,
+        json: Optional[String] = None,
         headers: Optional[Dict[String, String]] = None,
         timeout: Optional[Float64] = None,
         allow_redirects: Bool = True,
     ) raises -> Response:
-        return self.request("PUT", url, headers=headers, data=data, json=json, timeout=timeout, allow_redirects=allow_redirects)
+        return self.request(
+            "PUT",
+            url,
+            headers=headers,
+            data=data,
+            json=json,
+            timeout=timeout,
+            allow_redirects=allow_redirects,
+        )
 
     def patch(
-        mut self, url: String, data: Optional[String] = None, json: Optional[String] = None,
+        mut self,
+        url: String,
+        data: Optional[String] = None,
+        json: Optional[String] = None,
         headers: Optional[Dict[String, String]] = None,
         timeout: Optional[Float64] = None,
         allow_redirects: Bool = True,
     ) raises -> Response:
-        return self.request("PATCH", url, headers=headers, data=data, json=json, timeout=timeout, allow_redirects=allow_redirects)
+        return self.request(
+            "PATCH",
+            url,
+            headers=headers,
+            data=data,
+            json=json,
+            timeout=timeout,
+            allow_redirects=allow_redirects,
+        )
 
     def delete(
-        mut self, url: String, headers: Optional[Dict[String, String]] = None,
+        mut self,
+        url: String,
+        headers: Optional[Dict[String, String]] = None,
         timeout: Optional[Float64] = None,
         allow_redirects: Bool = True,
     ) raises -> Response:
-        return self.request("DELETE", url, headers=headers, timeout=timeout, allow_redirects=allow_redirects)
+        return self.request(
+            "DELETE",
+            url,
+            headers=headers,
+            timeout=timeout,
+            allow_redirects=allow_redirects,
+        )
 
     def head(
-        mut self, url: String, headers: Optional[Dict[String, String]] = None,
+        mut self,
+        url: String,
+        headers: Optional[Dict[String, String]] = None,
         timeout: Optional[Float64] = None,
         allow_redirects: Bool = True,
     ) raises -> Response:
-        return self.request("HEAD", url, headers=headers, timeout=timeout, allow_redirects=allow_redirects)
+        return self.request(
+            "HEAD",
+            url,
+            headers=headers,
+            timeout=timeout,
+            allow_redirects=allow_redirects,
+        )
 
     def options(
-        mut self, url: String, headers: Optional[Dict[String, String]] = None,
+        mut self,
+        url: String,
+        headers: Optional[Dict[String, String]] = None,
         timeout: Optional[Float64] = None,
         allow_redirects: Bool = True,
     ) raises -> Response:
-        return self.request("OPTIONS", url, headers=headers, timeout=timeout, allow_redirects=allow_redirects)
+        return self.request(
+            "OPTIONS",
+            url,
+            headers=headers,
+            timeout=timeout,
+            allow_redirects=allow_redirects,
+        )
 
 
 # --- helpers ---
@@ -422,7 +516,11 @@ def _resolve_redirect(base_url: String, location: String) raises -> String:
 
     # Protocol-relative: "//host/path"
     var loc_ptr = location.unsafe_ptr()
-    if location.byte_length() >= 2 and loc_ptr[0] == 0x2F and loc_ptr[1] == 0x2F:
+    if (
+        location.byte_length() >= 2
+        and loc_ptr[0] == 0x2F
+        and loc_ptr[1] == 0x2F
+    ):
         return base.scheme + ":" + location
 
     # Root-relative: "/path"
@@ -433,7 +531,7 @@ def _resolve_redirect(base_url: String, location: String) raises -> String:
     # Strip the filename from the base path, append the relative location.
     var last_slash = _find_reverse(base.path, "/")
     if last_slash >= 0:
-        var dir = String(base.path[byte=0 : last_slash + 1])
+        var dir = String(base.path[byte = 0 : last_slash + 1])
         return origin + dir + location
     return origin + "/" + location
 
@@ -494,7 +592,8 @@ def _crlf_crlf() -> List[UInt8]:
 
 
 def _find_in_list(buf: List[UInt8], needle: List[UInt8]) -> Int:
-    """Return the byte index of the first occurrence of ``needle`` in ``buf``, or -1."""
+    """Return the byte index of the first occurrence of ``needle`` in ``buf``, or -1.
+    """
     var bl = len(buf)
     var nl = len(needle)
     if nl == 0 or bl < nl:

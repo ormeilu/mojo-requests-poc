@@ -56,7 +56,8 @@ def http_error(msg: String, status_code: Int) -> Error:
 
 
 def ssl_error(msg: String) -> Error:
-    """A TLS/SSL error (handshake failure, certificate validation, missing libssl, etc.)."""
+    """A TLS/SSL error (handshake failure, certificate validation, missing libssl, etc.).
+    """
     return Error(t"SSLError: {msg}")
 
 
