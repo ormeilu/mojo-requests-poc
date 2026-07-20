@@ -6,7 +6,7 @@
 
 from std.ffi import external_call, c_int
 from std.memory import alloc
-from .exceptions import connection_error, timeout_error
+from .exceptions import ConnectionError, Timeout
 
 
 # POSIX socket constants (kept as comptime c_int so they pass to external_call cleanly).
@@ -19,6 +19,15 @@ comptime SO_SNDTIMEO: c_int = 0x1005
 # send/recv flags
 comptime SEND_FLAGS: c_int = 0
 comptime RECV_FLAGS: c_int = 0
+
+# Errno values for timeout detection. EAGAIN and EWOULDBLOCK are equal on every supported
+# platform (macOS: 35, Linux: 11), so we accept both values to stay portable without a
+# platform check. When a connect/send/recv syscall fails on a socket that had
+# SO_RCVTIMEO/SO_SNDTIMEO set and the socket's SO_ERROR matches one of these, we raise
+# ``Timeout`` instead of ``ConnectionError``.
+comptime SO_ERROR: c_int = 0x1007
+comptime EAGAIN_MACOS: c_int = 35
+comptime EAGAIN_LINUX: c_int = 11
 
 
 @fieldwise_init
@@ -58,10 +67,12 @@ struct TCPSocket:
 
     var fd: c_int
     var closed: Bool
+    var _has_timeout: Bool
 
     def __init__(out self):
         self.fd = c_int(-1)
         self.closed = True
+        self._has_timeout = False
 
     def __del__(deinit self):
         self.close()
@@ -101,7 +112,7 @@ struct TCPSocket:
             AF_INET, SOCK_STREAM, c_int(0)
         )
         if raw_fd < c_int(0):
-            raise connection_error("socket() failed")
+            raise ConnectionError("socket() failed")
         self.fd = raw_fd
         self.closed = False
 
@@ -118,13 +129,18 @@ struct TCPSocket:
         var rc = external_call["connect", c_int](self.fd, sa, c_int(16))
         sa.free()
         if rc < c_int(0):
+            # Query SO_ERROR *before* closing the fd (getsockopt needs a live socket).
+            var was_timeout = self._is_timeout()
             self._raw_close()
             if host_label.byte_length() > 0:
-                raise connection_error(
-                    String(t"connect() to {host_label}:{String(port)} failed")
+                self._io_failure(
+                    String(t"connect() to {host_label}:{String(port)} failed"),
+                    host=host_label,
+                    was_timeout=was_timeout,
                 )
-            raise connection_error(
-                String(t"connect() to port {String(port)} failed")
+            self._io_failure(
+                String(t"connect() to port {String(port)} failed"),
+                was_timeout=was_timeout,
             )
 
     def _set_timeouts(mut self, timeout_secs: Float64) raises:
@@ -141,6 +157,46 @@ struct TCPSocket:
             self.fd, SOL_SOCKET, SO_SNDTIMEO, tv, size
         )
         tv.free()
+        self._has_timeout = True
+
+    def _is_timeout(mut self) -> Bool:
+        """True if the socket's pending error (SO_ERROR) looks like an SO_RCVTIMEO/SO_SNDTIMEO
+        expiry on a socket that has a timeout set.
+
+        Uses ``getsockopt(SO_ERROR)`` — portable across macOS/Linux (unlike the ``__error`` /
+        ``__errno_location`` errno accessors, which require platform-specific symbol resolution
+        and ``external_call`` does not raise on a missing symbol, it JIT-crashes). EAGAIN and
+        EWOULDBLOCK are equal on every supported platform (macOS: 35, Linux: 11); accept both.
+        """
+        if not self._has_timeout:
+            return False
+        var err = alloc[c_int](1)
+        err[] = c_int(0)
+        var lenp = alloc[c_int](1)
+        lenp[] = c_int(4)
+        _ = external_call["getsockopt", c_int](
+            self.fd, SOL_SOCKET, SO_ERROR, err, lenp
+        )
+        var e = err[]
+        err.free()
+        lenp.free()
+        return e == EAGAIN_MACOS or e == EAGAIN_LINUX
+
+    def _io_failure(
+        self, msg: String, *, host: String = "", was_timeout: Bool = False
+    ) raises:
+        """Raise ``Timeout`` if ``was_timeout`` is set (caller pre-queried SO_ERROR before
+        closing the socket); otherwise raise ``ConnectionError``.
+
+        ``was_timeout`` is passed explicitly because callers must query SO_ERROR while the fd
+        is still live (before ``_raw_close``), then close, then come here to raise.
+
+        Mojo 1.0 has no multi-type ``raises`` union, so this helper is bare ``raises`` and
+        callers (which also raise both categories) propagate as bare ``raises``.
+        """
+        if was_timeout:
+            raise Timeout(msg, host=host)
+        raise ConnectionError(msg, host=host)
 
     def send_all(mut self, data: String) raises:
         """Send the full request string, looping over partial sends."""
@@ -152,7 +208,10 @@ struct TCPSocket:
                 self.fd, ptr + offset, c_int(remaining), SEND_FLAGS
             )
             if sent <= c_int(0):
-                raise connection_error("send() failed or connection closed")
+                self._io_failure(
+                    "send() failed or connection closed",
+                    was_timeout=self._is_timeout(),
+                )
             offset += Int(sent)
             remaining -= Int(sent)
 
@@ -166,7 +225,10 @@ struct TCPSocket:
                 self.fd, ptr + offset, c_int(remaining), SEND_FLAGS
             )
             if sent <= c_int(0):
-                raise connection_error("send() failed or connection closed")
+                self._io_failure(
+                    "send() failed or connection closed",
+                    was_timeout=self._is_timeout(),
+                )
             offset += Int(sent)
             remaining -= Int(sent)
 

@@ -9,7 +9,7 @@
 
 from std.ffi import OwnedDLHandle, c_int, external_call
 from std.memory import alloc, OwnedPointer
-from .exceptions import ssl_error
+from .exceptions import SSLError
 
 
 # OpenSSL constants (comptime c_int so they pass cleanly to OwnedDLHandle.call).
@@ -54,7 +54,7 @@ struct TLSConnection:
         hostname: String,
         verify: Bool = True,
         ca_bundle: Optional[String] = None,
-    ) raises:
+    ) raises SSLError:
         """Perform the TLS handshake over an already-connected socket.
 
         - ``sock_fd``: the connected raw socket fd (from TCPSocket.fd_value()).
@@ -66,7 +66,7 @@ struct TLSConnection:
           priority order: explicit ca_bundle > $REQUESTS_CA_BUNDLE env var > $SSL_CERT_FILE
           env var > OpenSSL system defaults (``SSL_CTX_set_default_verify_paths``).
 
-        Raises ``ssl_error`` on any failure (missing libssl, handshake failure, cert rejection).
+        Raises ``SSLError`` on any failure (missing libssl, handshake failure, cert rejection).
         """
         var libssl = _load_libssl()
         # Store the handle on the heap so it lives as long as this TLSConnection.
@@ -77,7 +77,7 @@ struct TLSConnection:
             c_int(0), c_int(0)
         )
         if init_rc != c_int(1):
-            raise ssl_error("OPENSSL_init_ssl failed")
+            raise SSLError("OPENSSL_init_ssl failed")
 
         # Build a TLS context with certificate verification enabled.
         var method = self._libssl.value()[].call[
@@ -87,7 +87,7 @@ struct TLSConnection:
             "SSL_CTX_new", UnsafePointer[UInt8, MutUntrackedOrigin]
         ](method)
         if Int(ctx) == 0:
-            raise ssl_error("SSL_CTX_new returned NULL")
+            raise SSLError("SSL_CTX_new returned NULL")
         self._ctx = ctx
 
         if verify:
@@ -142,7 +142,7 @@ struct TLSConnection:
                 cpath.free()
                 if rc != c_int(1):
                     var derr = _drain_openssl_errors(self._libssl.value()[])
-                    raise ssl_error(
+                    raise SSLError(
                         String(
                             t"failed to load CA bundle:"
                             t" {resolved_path} ({derr})"
@@ -168,7 +168,7 @@ struct TLSConnection:
             "SSL_new", UnsafePointer[UInt8, MutUntrackedOrigin]
         ](ctx)
         if Int(ssl) == 0:
-            raise ssl_error("SSL_new returned NULL")
+            raise SSLError("SSL_new returned NULL")
         self._ssl = ssl
 
         # Bind the SSL object to the existing socket fd.
@@ -176,7 +176,7 @@ struct TLSConnection:
             ssl, sock_fd
         )
         if setfd_rc != c_int(1):
-            raise ssl_error("SSL_set_fd failed")
+            raise SSLError("SSL_set_fd failed")
 
         # SNI: SSL_set_tlsext_host_name is a macro -> SSL_ctrl(ssl, 55, 0, hostname).
         # Many CDNs/servers refuse TLS without SNI, so this is mandatory.
@@ -196,21 +196,23 @@ struct TLSConnection:
         )
         chost.free()
         if sni_rc != c_int(1):
-            raise ssl_error(
-                String(t"SNI (SSL_set_tlsext_host_name) failed for {hostname}")
+            raise SSLError(
+                String(t"SNI (SSL_set_tlsext_host_name) failed for {hostname}"),
+                hostname=hostname,
             )
 
         # Perform the handshake.
         var connect_rc = self._libssl.value()[].call["SSL_connect", c_int](ssl)
         if connect_rc != c_int(1):
             var err = _get_ssl_error(self._libssl.value()[], ssl, connect_rc)
-            raise ssl_error(
-                String(t"TLS handshake failed for {hostname}: {err}")
+            raise SSLError(
+                String(t"TLS handshake failed for {hostname}: {err}"),
+                hostname=hostname,
             )
 
         self._closed = False
 
-    def send_all(mut self, data: String) raises:
+    def send_all(mut self, data: String) raises SSLError:
         """Send the full request string over TLS, looping over partial SSL_write calls.
         """
         var ptr = data.unsafe_ptr()
@@ -221,7 +223,7 @@ struct TLSConnection:
                 self._ssl.value(), ptr + offset, c_int(remaining)
             )
             if written <= c_int(0):
-                raise ssl_error("SSL_write failed or connection closed")
+                raise SSLError("SSL_write failed or connection closed")
             offset += Int(written)
             remaining -= Int(written)
 
@@ -303,7 +305,7 @@ comptime CHUNK_SIZE = 8192
 # Candidate library paths, tried in order. Covers macOS Homebrew, macOS /usr/local,
 # and Linux standard locations, plus a bare name as a last resort (lets the dynamic
 # loader resolve via DYLD_LIBRARY_PATH / ldconfig).
-def _load_libssl() raises -> OwnedDLHandle:
+def _load_libssl() raises SSLError -> OwnedDLHandle:
     """Discover and dlopen libssl. Each TLSConnection owns its handle (no global cache: Mojo has no mutable globals).
     """
     var candidates: List[String] = [
@@ -330,7 +332,7 @@ def _load_libssl() raises -> OwnedDLHandle:
         except _:
             pass
 
-    raise ssl_error(String(t"could not find libssl. Tried: {tried}"))
+    raise SSLError(String(t"could not find libssl. Tried: {tried}"))
 
 
 # --- env var access (libc getenv via FFI) ---------------------------------

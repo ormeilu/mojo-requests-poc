@@ -12,7 +12,7 @@ from ._tls import TLSConnection
 from ._cookies import CookieJar
 from ._streaming import StreamingConn
 from .models import Response, Headers
-from .exceptions import request_exception
+from .exceptions import RequestException
 from std.memory import OwnedPointer
 from std.ffi import c_int, OwnedDLHandle
 
@@ -149,7 +149,7 @@ struct Session:
                 eff_ca_bundle,
             )
 
-        raise request_exception("too many redirects (max 30)")
+        raise RequestException("too many redirects (max 30)")
 
     def _do_request(
         mut self,
@@ -219,61 +219,68 @@ struct Session:
             final_url = final_url + "?" + u.query
 
         # Connect, send. Branch on scheme: https wraps the TCP socket in TLS.
+        # NOTE: the connect/send/recv try blocks are split per scheme because Mojo 1.0
+        # unifies exception types within a single try block — a typed `raises SSLError`
+        # call (tls.*) cannot coexist with a bare `raises` call (sock.*) in the same block.
         var sock = TCPSocket()
         var tls = TLSConnection()
         var is_https = scheme == "https"
-        var connect_err = String()
-        var connected = False
-        try:
-            sock.connect_ip(ip, port, timeout)
-            if is_https:
+        if is_https:
+            try:
+                sock.connect_ip(ip, port, timeout)
                 tls.connect(sock.fd_value(), host, verify, ca_bundle)
-            connected = True
-        except e:
-            connect_err = String(e)
-        if not connected:
-            tls.close()
-            sock.close()
-            raise request_exception(connect_err)
+            except e:
+                # Close resources, then re-raise the ORIGINAL typed error (SSLError /
+                # ConnectionError / Timeout) preserving its concrete type — instead of
+                # flattening it into a RequestException.
+                tls.close()
+                sock.close()
+                raise e^
+        else:
+            try:
+                sock.connect_ip(ip, port, timeout)
+            except e:
+                sock.close()
+                raise e^
 
         # Send the request.
-        var send_err = String()
-        var sent_ok = False
-        try:
-            if is_https:
+        if is_https:
+            try:
                 tls.send_all(req_str)
-            else:
+            except e:
+                tls.close()
+                sock.close()
+                raise e^
+        else:
+            try:
                 sock.send_all(req_str)
-            sent_ok = True
-        except e:
-            send_err = String(e)
-        if not sent_ok:
-            tls.close()
-            sock.close()
-            raise request_exception(send_err)
+            except e:
+                sock.close()
+                raise e^
 
         if stream:
             # Streaming: read headers incrementally, keep the connection alive in the Response.
             return self._stream_response(sock^, tls^, is_https, host, final_url)
 
         # Non-streaming: read the full response, then close.
-        var raw = List[UInt8]()
-        var recv_err = String()
-        var recv_ok = False
-        try:
-            if is_https:
+        var raw: List[UInt8]
+        if is_https:
+            try:
                 raw = tls.recv_all()
-            else:
+            except e:
+                tls.close()
+                sock.close()
+                raise e^
+        else:
+            try:
                 raw = sock.recv_all()
-            recv_ok = True
-        except e:
-            recv_err = String(e)
+            except e:
+                sock.close()
+                raise e^
         tls.close()
         sock.close()
-        if not recv_ok:
-            raise request_exception(recv_err)
         if len(raw) == 0:
-            raise request_exception("empty response from server")
+            raise RequestException("empty response from server")
 
         var parsed = parse_response(raw)
         var resp = _build_response(parsed^, final_url)
@@ -316,7 +323,7 @@ struct Session:
         if not term_found:
             tls.close()
             sock.close()
-            raise request_exception("streaming: incomplete response headers")
+            raise RequestException("streaming: incomplete response headers")
 
         # Split header bytes from leftover body bytes at the terminator.
         var sep = _find_in_list(header_buf, _crlf_crlf())

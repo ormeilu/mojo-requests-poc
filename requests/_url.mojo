@@ -3,7 +3,7 @@
 # Parses absolute HTTP URLs into scheme/host/port/path/query/fragment.
 # Implements percent-encoding for query strings and form bodies.
 
-from .exceptions import invalid_url_error, unsupported_scheme_error
+from .exceptions import InvalidURL, UnsupportedScheme
 
 
 struct URL(Movable, Writable):
@@ -57,7 +57,7 @@ struct URL(Movable, Writable):
 def parse_url(raw: String) raises -> URL:
     """Parse an absolute ``http://host[:port][/path][?query][#fragment]`` URL.
 
-    Raises ``invalid_url_error`` on malformed input and ``unsupported_scheme_error`` for non-http schemes.
+    Raises ``InvalidURL`` on malformed input and ``UnsupportedScheme`` for non-http schemes.
     """
     var s = raw
     var u = URL()
@@ -65,14 +65,13 @@ def parse_url(raw: String) raises -> URL:
     # scheme://
     var sep = _find(s, "://")
     if sep < 0:
-        raise invalid_url_error(
-            String(t"URL missing scheme (use http://): {raw}")
-        )
+        raise InvalidURL(String(t"URL missing scheme (use http://): {raw}"))
     u.scheme = _to_lower(String(s[byte=0:sep]))
 
     if u.scheme != "http" and u.scheme != "https":
-        raise unsupported_scheme_error(
-            String(t"scheme '{u.scheme}' not supported (only http/https)")
+        raise UnsupportedScheme(
+            String(t"scheme '{u.scheme}' not supported (only http/https)"),
+            scheme=u.scheme,
         )
 
     var rest_start = sep + 3  # skip "://"
@@ -104,7 +103,7 @@ def parse_url(raw: String) raises -> URL:
 
     # authority = host[:port]
     if authority.byte_length() == 0:
-        raise invalid_url_error(String(t"URL missing host: {raw}"))
+        raise InvalidURL(String(t"URL missing host: {raw}"))
 
     var colon = _find(authority, ":")
     if colon >= 0:
@@ -116,7 +115,7 @@ def parse_url(raw: String) raises -> URL:
             or parsed_port.value() < 1
             or parsed_port.value() > 65535
         ):
-            raise invalid_url_error(String(t"URL has invalid port: {port_str}"))
+            raise InvalidURL(String(t"URL has invalid port: {port_str}"))
         u.port = parsed_port.value()
     else:
         u.host = authority

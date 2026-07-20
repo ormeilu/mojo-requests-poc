@@ -9,6 +9,8 @@ from std.testing import assert_equal, assert_true, assert_false, TestSuite
 from requests._url import parse_url, url_encode, build_query_string, _find
 from requests._http import build_request, parse_response
 from requests._json import parse_json
+from requests.exceptions import exception_kind
+from requests.models import Response, Headers
 
 
 def _contains(haystack: String, needle: String) -> Bool:
@@ -170,6 +172,79 @@ def test_json_types() raises:
 def test_json_nested() raises:
     var j = parse_json('{"a":[{"b":2}]}')
     assert_equal(j["a"][0]["b"].as_int(), 2)
+
+
+# --- typed-exception classification ---
+#
+# These exercise the new typed-Error-struct model at the leaf functions: each typed leaf
+# raises a concrete struct (InvalidURL / UnsupportedScheme / HTTPError / RequestException)
+# that propagates through bare-`raises` callers and is recoverable only via exception_kind()
+# on the caught Error's rendered message (Mojo 1.0 has no runtime type recovery on caught
+# Error — see requests/exceptions.mojo docstring).
+
+
+def _classify_parse_error(url: String) raises -> String:
+    """Run parse_url (which raises InvalidURL / UnsupportedScheme) and classify the caught error.
+    """
+    try:
+        _ = parse_url(url)
+        return ""  # unreachable — url is malformed
+    except e:
+        return exception_kind(e)
+
+
+def _classify_json_error(doc: String) raises -> String:
+    try:
+        _ = parse_json(doc)
+        return ""  # unreachable — doc is malformed
+    except e:
+        return exception_kind(e)
+
+
+def _classify_raise_for_status(status_code: Int) raises -> String:
+    # Build a minimal Response with the given status code and call raise_for_status.
+    var r = Response(status_code, "Bad", Headers(), List[UInt8](), "http://x/")
+    try:
+        r.raise_for_status()
+        return "none"
+    except e:
+        return exception_kind(e)
+
+
+def test_parse_ftp_scheme_classifies_unsupported() raises:
+    # UnsupportedScheme is a typed leaf in parse_url.
+    assert_equal(
+        _classify_parse_error("ftp://example.com"), "UnsupportedScheme"
+    )
+
+
+def test_parse_missing_scheme_classifies_invalid_url() raises:
+    # InvalidURL is a typed leaf in parse_url (separate category from UnsupportedScheme;
+    # parse_url raises both, so it stays bare `raises`).
+    assert_equal(_classify_parse_error("example.com/path"), "InvalidURL")
+
+
+def test_parse_bad_port_classifies_invalid_url() raises:
+    assert_equal(
+        _classify_parse_error("http://example.com:notaport/"), "InvalidURL"
+    )
+
+
+def test_malformed_json_classifies_request_exception() raises:
+    # RequestException is raised by the JSON parser on malformed input.
+    assert_equal(_classify_json_error("{not valid"), "RequestException")
+
+
+def test_raise_for_status_classifies_http_error() raises:
+    # HTTPError is a typed leaf on Response.raise_for_status (carries status_code).
+    assert_equal(_classify_raise_for_status(404), "HTTPError")
+    assert_equal(_classify_raise_for_status(500), "HTTPError")
+
+
+def test_raise_for_status_noop_under_400() raises:
+    # raise_for_status is a no-op for 2xx/3xx.
+    assert_equal(_classify_raise_for_status(200), "none")
+    assert_equal(_classify_raise_for_status(301), "none")
 
 
 # --- runner (auto-discovers all test_* functions in this module) ---

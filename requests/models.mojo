@@ -3,7 +3,7 @@
 # Headers is a case-insensitive view over response headers. Response wraps a parsed HTTP response and
 # provides the requests-like API (status_code, text, content, headers, ok, json(), raise_for_status()).
 
-from .exceptions import http_error
+from .exceptions import HTTPError
 from ._http import _bytes_to_string
 from ._json import parse_json
 from ._streaming import StreamingConn
@@ -179,17 +179,16 @@ struct Response(Movable, Writable):
         return _bytes_to_string(self.content)
 
     def json(mut self) raises -> JSONValue:
-        """Parse the body as JSON. Raises request_exception on malformed JSON.
-        """
+        """Parse the body as JSON. Raises RequestException on malformed JSON."""
         return parse_json(self.text())
 
-    def raise_for_status(self) raises:
-        """Raise http_error for 4xx/5xx responses; no-op otherwise."""
+    def raise_for_status(self) raises HTTPError:
+        """Raise HTTPError for 4xx/5xx responses; no-op otherwise."""
         if self.status_code >= 400:
             var msg = self.reason
             if msg.byte_length() == 0:
                 msg = "HTTP error"
-            raise http_error(msg, self.status_code)
+            raise HTTPError(msg, status_code=self.status_code)
 
     def write_to(self, mut writer: Some[Writer]):
         writer.write(

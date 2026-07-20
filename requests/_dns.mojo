@@ -6,7 +6,7 @@
 
 from std.ffi import external_call, c_int
 from std.memory import alloc
-from .exceptions import connection_error
+from .exceptions import ConnectionError
 
 
 # POSIX constants
@@ -51,11 +51,11 @@ struct Timespec:
     var tv_nsec: Int64
 
 
-def resolve(host: String) raises -> UInt32:
+def resolve(host: String) raises ConnectionError -> UInt32:
     """Resolve a host string to an IPv4 address (host byte order).
 
     Accepts dotted-decimal ("127.0.0.1", "8.8.8.8") or a hostname ("example.com").
-    Raises ``connection_error`` on failure.
+    Raises ``ConnectionError`` on failure.
     """
     # Try dotted-decimal first via inet_pton (returns 1 on success, 0 on malformed).
     var dst = alloc[InAddr](1)
@@ -70,7 +70,7 @@ def resolve(host: String) raises -> UInt32:
     return _resolve_by_name(host)
 
 
-def _resolve_by_name(host: String) raises -> UInt32:
+def _resolve_by_name(host: String) raises ConnectionError -> UInt32:
     """Resolve a hostname via libc ``getaddrinfo`` (thread-safe, heap-allocated — unlike gethostbyname).
 
     Retries up to 5 times with exponential backoff (50ms, 100ms, 200ms, 400ms): the first
@@ -115,23 +115,23 @@ def _resolve_by_name(host: String) raises -> UInt32:
     hints.free()
     if rc != c_int(0):
         result_addr.free()
-        raise connection_error(
-            String(t"DNS resolution failed for host: {host}")
+        raise ConnectionError(
+            String(t"DNS resolution failed for host: {host}"), host=host
         )
 
     var first = result_addr[]
     result_addr.free()
     if Int(first) == 0:
-        raise connection_error(
-            String(t"DNS returned no addresses for host: {host}")
+        raise ConnectionError(
+            String(t"DNS returned no addresses for host: {host}"), host=host
         )
 
     # ai_addr points to a sockaddr; for AF_INET it's a sockaddr_in. Reinterpret and read sin_addr.
     var ai_addr = first[].ai_addr
     if ai_addr == 0:
         _ = external_call["freeaddrinfo", NoneType](first)
-        raise connection_error(
-            String(t"DNS entry has no address for host: {host}")
+        raise ConnectionError(
+            String(t"DNS entry has no address for host: {host}"), host=host
         )
 
     var sockaddr_ptr = UnsafePointer[SockAddrIn, MutUntrackedOrigin](

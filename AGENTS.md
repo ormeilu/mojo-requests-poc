@@ -8,6 +8,12 @@ A pure-Mojo HTTP client modeled after Python's `requests`. **No Python, no libcu
 
 Targeting **Mojo 1.0.0b3** (nightly). The language is moving fast — older/newer builds may need small tweaks.
 
+> **Hit a weird Mojo behavior?** Check [`STRUGGLES.md`](STRUGGLES.md) first — it's the long-form
+> field log of every language/stdlib gap, compiler bug, and non-obvious behavior we've fought
+> (String×FFI `unsafe_ptr` clobbering, interior-reference lifetime errors, the typed-error
+> model's limitations, DNS flakiness, missing stdlib, etc.), each with Symptom/Cause/Fix/Where.
+> The condensed gotchas below are the cheat-sheet; STRUGGLES.md is the narrative.
+
 ## Layout
 
 ```

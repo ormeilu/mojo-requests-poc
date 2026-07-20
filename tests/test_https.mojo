@@ -13,7 +13,7 @@ from std.testing import assert_equal, assert_true, assert_false, TestSuite
 from std.ffi import external_call
 from requests._url import parse_url
 from requests.session import Session
-from requests.exceptions import ssl_error, exception_kind
+from requests.exceptions import SSLError, exception_kind
 
 
 # --- helpers ---
@@ -79,17 +79,43 @@ def test_http_still_defaults_to_80() raises:
 # --- SSLError exception kind ---
 
 
+def _raise_ssl(msg: String) raises SSLError:
+    """Raise an SSLError so tests can exercise the real raise -> catch -> classify path.
+    """
+    raise SSLError(msg)
+
+
+def _classify_raised_ssl(msg: String) raises -> String:
+    """Catch an SSLError raised by ``_raise_ssl`` and return ``exception_kind`` of it.
+
+    This validates the full typed-raise -> bare-raises-propagation -> caught-and-classified
+    path, not just synthetic construction.
+    """
+    try:
+        _ = _raise_ssl(msg)
+        return ""  # unreachable
+    except e:
+        return exception_kind(e)
+
+
+def _render_raised_ssl(msg: String) raises -> String:
+    """Catch an SSLError raised by ``_raise_ssl`` and return its rendered string form.
+    """
+    try:
+        _ = _raise_ssl(msg)
+        return ""  # unreachable
+    except e:
+        return String(e)
+
+
 def test_ssl_error_kind() raises:
-    var err = ssl_error("handshake failed")
-    assert_equal(exception_kind(err), "SSLError")
+    # SSLError raised in a typed context, propagated through bare `raises`, caught and classified.
+    assert_equal(_classify_raised_ssl("handshake failed"), "SSLError")
 
 
 def test_ssl_error_message() raises:
-    var err = ssl_error("cert invalid")
-    var s = String(err)
-    assert_true(
-        s == "SSLError: cert invalid", "ssl_error message should be prefixed"
-    )
+    # The caught Error renders via SSLError.write_to, preserving the "SSLError: ..." prefix.
+    assert_equal(_render_raised_ssl("cert invalid"), "SSLError: cert invalid")
 
 
 # --- TLS layer importable (compile-time check that _tls.mojo is well-formed) ---

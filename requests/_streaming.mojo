@@ -6,7 +6,6 @@
 
 from std.ffi import external_call, OwnedDLHandle, c_int
 from std.memory import OwnedPointer, alloc
-from .exceptions import request_exception
 
 
 # POSIX constants (mirror _net.mojo / _tls.mojo).

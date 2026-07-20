@@ -10,6 +10,13 @@ percent-encoding, and a JSON parser — is written in Mojo.
 > **Mojo version:** built and tested against Mojo 1.0.0b3 (nightly). Mojo is evolving rapidly; older or
 > newer builds may require small adjustments.
 
+> **Building this fought back.** Mojo 1.0 is pre-stable — FFI pointer-lifetime clobbers, interior-reference
+> slicing bugs, a partially-impossible typed-exception model, lazy-init DNS flakiness, and missing stdlib
+> (`std.json`, `std.net`, mutable globals, platform detection) all had to be worked around. Every one is
+> documented — symptom, cause, fix, and a file:line pointer — in [`STRUGGLES.md`](STRUGGLES.md), the
+> long-form field log. See also [`AGENTS.md`](AGENTS.md) (contributor orientation) and [`TODO.md`](TODO.md)
+> (roadmap).
+
 ## Quick start
 
 ```bash

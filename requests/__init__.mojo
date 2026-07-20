@@ -10,6 +10,7 @@ from .exceptions import (
     InvalidURL,
     UnsupportedScheme,
     HTTPError,
+    SSLError,
 )
 from .models import Response, Headers
 from .session import Session

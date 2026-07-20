@@ -4,7 +4,7 @@
 # Supports Content-Length framing and Transfer-Encoding: chunked dechunking.
 
 from ._url import URL, build_query_string, url_encode, _to_lower, _find
-from .exceptions import request_exception
+from .exceptions import RequestException
 from std.memory import OwnedPointer
 
 
@@ -71,16 +71,16 @@ def parse_headers(head: String) raises -> ParsedHeaders:
     """
     var lines = head.split(CRLF)
     if len(lines) == 0:
-        raise request_exception("malformed response: empty header block")
+        raise RequestException("malformed response: empty header block")
 
     # Status line: "HTTP/1.1 200 OK"
     var status_line = String(lines[0])
     var status_parts = status_line.split(" ")
     if len(status_parts) < 2:
-        raise request_exception(String(t"malformed status line: {status_line}"))
+        raise RequestException(String(t"malformed status line: {status_line}"))
     var code = _parse_int_local(String(status_parts[1]))
     if code == None:
-        raise request_exception(
+        raise RequestException(
             String(t"malformed status code: {status_parts[1]}")
         )
 
@@ -148,7 +148,7 @@ def parse_response(raw: List[UInt8]) raises -> ParsedResponse:
     # Split headers from body at the first \r\n\r\n.
     var sep = _find(raw_str, HEADER_TERMINATOR)
     if sep < 0:
-        raise request_exception("malformed response: no header/body separator")
+        raise RequestException("malformed response: no header/body separator")
 
     var head = String(raw_str[byte=0:sep])
     var body_start = sep + 4  # len("\r\n\r\n")
@@ -224,7 +224,7 @@ def _dechunk(raw: List[UInt8], body_start: Int) raises -> List[UInt8]:
         size_str = _strip(size_str)
         var size = _parse_hex(size_str)
         if size == None:
-            raise request_exception(String(t"malformed chunk size: {size_str}"))
+            raise RequestException(String(t"malformed chunk size: {size_str}"))
         pos = size_line.next_pos  # past "\r\n"
         if size.value() == 0:
             break

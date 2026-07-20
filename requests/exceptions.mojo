@@ -1,74 +1,175 @@
-# Exception helpers for the pure-Mojo requests library.
+# Typed exceptions for the pure-Mojo requests library.
 #
-# Mojo's `Error` is a builtin struct, not a trait user types can conform to. So we model
-# exceptions as constructor functions that build an `Error` value carrying a recognizable, prefixed message.
-# This mirrors the categories Python's `requests.exceptions` exposes (ConnectionError, Timeout, HTTPError, ...)
-# while staying within Mojo's error model.
+# Each exception category is a `@Movable, Writable` struct that can be raised directly
+# (`raise ConnectionError("refused", host=...)`) and renders a stable, prefixed message via
+# `write_to`. The categories mirror Python's `requests.exceptions`.
 #
-# Classify a caught `Error` with `exception_kind()` to recover the category.
+# ## Leaf functions are typed; orchestration is bare `raises`
+#
+# Leaf functions that raise a single category carry a typed `raises` clause — e.g.
+# `_dns.resolve` is `raises ConnectionError`, `TLSConnection.connect` is `raises SSLError`,
+# `Response.raise_for_status` is `raises HTTPError`. Callers in the same typed context can
+# pattern-match on the concrete struct.
+#
+# The Session orchestration layer (`_do_request`, `request`, `get`/`post`/...) fans out to
+# several disjoint error types, and Mojo 1.0 has no multi-type `raises` union
+# (`raises A | B` / `raises A, B` / `raises [A, B]` all fail to parse). Those functions stay
+# bare `raises` and propagate the concrete struct value up via `raise e^` — the struct's type
+# is preserved through the `Error` wrapper and renders via `write_to`, but its fields cannot
+# be recovered by the catcher (a caught `Error` exposes no runtime type-recovery API).
+#
+# ## Classification stays string-prefix-based
+#
+# Because a caught `Error` cannot be introspected back to its concrete struct, runtime
+# dispatch is done by parsing the rendered message prefix via `exception_kind()`. The prefix
+# each `write_to` emits is pinned by the `comptime *_PREFIX` constants below so the classifier
+# and the structs never drift.
 
-from std.io import print
 
-
-# Exception category tags. Values are matched against the message prefix produced by
-# the constructors below. Keep these in sync with the constructors.
+# Prefix each struct's write_to emits. Keep in sync with the write_to implementations.
+comptime REQUEST_PREFIX = "RequestException"
 comptime CONNECTION_PREFIX = "ConnectionError"
 comptime TIMEOUT_PREFIX = "Timeout"
 comptime INVALID_URL_PREFIX = "InvalidURL"
 comptime UNSUPPORTED_SCHEME_PREFIX = "UnsupportedScheme"
 comptime HTTP_ERROR_PREFIX = "HTTPError"
 comptime SSL_PREFIX = "SSLError"
-comptime REQUEST_PREFIX = "RequestException"
 
 
-# --- Constructors ---------------------------------------------------------
-# Each returns a ready-to-raise `Error`. The prefix encodes the category.
+# --- Structs --------------------------------------------------------------
 
 
-def request_exception(msg: String) -> Error:
-    """Generic requests error (base category)."""
-    return Error(t"RequestException: {msg}")
+struct RequestException(Movable, Writable):
+    """Base / generic requests error (no more specific category applies)."""
+
+    var msg: String
+
+    def __init__(out self, msg: String):
+        self.msg = msg
+
+    def write_to(self, mut writer: Some[Writer]):
+        writer.write(REQUEST_PREFIX, ": ", self.msg)
 
 
-def connection_error(msg: String) -> Error:
-    """A connection-level error (refused, reset, DNS failure, etc.)."""
-    return Error(t"ConnectionError: {msg}")
+struct ConnectionError(Movable, Writable):
+    """A connection-level error (refused, reset, DNS failure, etc.).
+
+    ``host`` is optional context (the peer hostname being contacted); it is folded into the
+    rendered message only when set, so the prefix stays stable for classification.
+    """
+
+    var msg: String
+    var host: String
+
+    def __init__(out self, msg: String, *, host: String = ""):
+        self.msg = msg
+        self.host = host
+
+    def write_to(self, mut writer: Some[Writer]):
+        if self.host.byte_length() > 0:
+            writer.write(
+                CONNECTION_PREFIX, ": ", self.msg, " (host=", self.host, ")"
+            )
+        else:
+            writer.write(CONNECTION_PREFIX, ": ", self.msg)
 
 
-def timeout_error(msg: String) -> Error:
-    """The request timed out."""
-    return Error(t"Timeout: {msg}")
+struct Timeout(Movable, Writable):
+    """The request timed out (SO_RCVTIMEO/SO_SNDTIMEO expired on a socket with a timeout set).
+    """
+
+    var msg: String
+    var host: String
+
+    def __init__(out self, msg: String, *, host: String = ""):
+        self.msg = msg
+        self.host = host
+
+    def write_to(self, mut writer: Some[Writer]):
+        if self.host.byte_length() > 0:
+            writer.write(
+                TIMEOUT_PREFIX, ": ", self.msg, " (host=", self.host, ")"
+            )
+        else:
+            writer.write(TIMEOUT_PREFIX, ": ", self.msg)
 
 
-def invalid_url_error(msg: String) -> Error:
-    """The URL was malformed or unsupported."""
-    return Error(t"InvalidURL: {msg}")
+struct InvalidURL(Movable, Writable):
+    """The URL was malformed (missing scheme, missing host, bad port)."""
+
+    var msg: String
+
+    def __init__(out self, msg: String):
+        self.msg = msg
+
+    def write_to(self, mut writer: Some[Writer]):
+        writer.write(INVALID_URL_PREFIX, ": ", self.msg)
 
 
-def unsupported_scheme_error(msg: String) -> Error:
-    """The URL scheme is not supported (only `http` is supported in v1)."""
-    return Error(t"UnsupportedScheme: {msg}")
+struct UnsupportedScheme(Movable, Writable):
+    """The URL scheme is not supported (only ``http`` and ``https`` are)."""
+
+    var msg: String
+    var scheme: String
+
+    def __init__(out self, msg: String, *, scheme: String = ""):
+        self.msg = msg
+        self.scheme = scheme
+
+    def write_to(self, mut writer: Some[Writer]):
+        writer.write(UNSUPPORTED_SCHEME_PREFIX, ": ", self.msg)
 
 
-def http_error(msg: String, status_code: Int) -> Error:
-    """An HTTP error response (e.g. 4xx/5xx from raise_for_status)."""
-    return Error(t"HTTPError {status_code}: {msg}")
+struct HTTPError(Movable, Writable):
+    """An HTTP error response (e.g. 4xx/5xx from ``raise_for_status``).
+
+    ``status_code`` renders into the prefix line (``HTTPError 404: ...``) so it is recoverable
+    by string-scanning for callers that catch the bare ``Error`` from ``raise_for_status``.
+    """
+
+    var msg: String
+    var status_code: Int
+
+    def __init__(out self, msg: String, *, status_code: Int = 0):
+        self.msg = msg
+        self.status_code = status_code
+
+    def write_to(self, mut writer: Some[Writer]):
+        writer.write(HTTP_ERROR_PREFIX, " ", self.status_code, ": ", self.msg)
 
 
-def ssl_error(msg: String) -> Error:
+struct SSLError(Movable, Writable):
     """A TLS/SSL error (handshake failure, certificate validation, missing libssl, etc.).
     """
-    return Error(t"SSLError: {msg}")
+
+    var msg: String
+    var hostname: String
+
+    def __init__(out self, msg: String, *, hostname: String = ""):
+        self.msg = msg
+        self.hostname = hostname
+
+    def write_to(self, mut writer: Some[Writer]):
+        if self.hostname.byte_length() > 0:
+            writer.write(
+                SSL_PREFIX, ": ", self.msg, " (hostname=", self.hostname, ")"
+            )
+        else:
+            writer.write(SSL_PREFIX, ": ", self.msg)
 
 
 # --- Classification --------------------------------------------------------
 
 
 def exception_kind(err: Error) -> String:
-    """Classify a caught Error by the prefix one of the constructors wrote.
+    """Classify a caught ``Error`` by the prefix one of the exception structs renders.
 
     Returns one of the category strings above (e.g. ``"ConnectionError"``).
     Falls back to ``"RequestException"`` for unrecognized messages.
+
+    This is string-prefix-based because a caught ``Error`` in Mojo 1.0 cannot be introspected
+    back to the concrete struct that was raised — ``write_to`` is the only signal that survives
+    a bare-``raises`` propagation boundary. See the module docstring for details.
     """
     var s = String(err)
     if _starts_with(s, CONNECTION_PREFIX):
@@ -87,7 +188,7 @@ def exception_kind(err: Error) -> String:
 
 
 def _starts_with(s: String, prefix: String) -> Bool:
-    """True if `s` begins with `prefix` (compared byte-by-byte)."""
+    """True if ``s`` begins with ``prefix`` (compared byte-by-byte)."""
     if s.byte_length() < prefix.byte_length():
         return False
     var pl = prefix.byte_length()

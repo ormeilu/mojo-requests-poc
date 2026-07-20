@@ -1,0 +1,418 @@
+# STRUGGLES
+
+A field log of everything that fought back while building `mojo-requests` against
+**Mojo 1.0.0b3** (`dev2026071921`, nightly). Mojo is a moving target in a raw, pre-stable
+state — most of these are language/stdlib gaps, compiler bugs, or behaviors that contradict
+both the docs and pretrained knowledge.
+
+Each entry has: **Symptom** (what you see), **Cause** (why), **Fix** (what we do), and a
+**Where** pointer into the codebase. This exists so nobody re-discovers these the hard way.
+
+> Companion docs: [`AGENTS.md`](AGENTS.md) (contributor orientation + gotchas) and
+> [`TODO.md`](TODO.md) (roadmap). This file is the long-form, narrative version of the pain.
+
+---
+
+## 1. Strings × FFI × `unsafe_ptr()` — the worst class of bug
+
+Three distinct-but-related failures, all in the String→C boundary. These were the hardest to
+diagnose because the bytes were *correct at call time* but the C library saw garbage.
+
+### 1.1 `String.unsafe_ptr()` is not stable across an FFI call boundary
+
+**Symptom:** `SSL_CTX_load_verify_locations(ctx, path, NULL)` returned `rc=0` with OpenSSL's
+error queue reporting `system library::No such file or directory` / `BIO routines::no such
+file` — even though the path bytes were correct when printed.
+
+**Cause:** A Mojo `String`'s backing buffer can be **clobbered between the moment the FFI
+shim materializes the C-ABI argument and the moment the C library actually dereferences it**.
+The window opens whenever other heap activity happens in between (e.g. `build_request`
+doing Dict + String concat work, which runs before OpenSSL gets to open the file). The shim
+hands OpenSSL a pointer into String storage that gets relocated/overwritten.
+
+**Fix:** Copy the string into an explicitly `alloc`'d, NUL-terminated buffer that we own and
+pass *that* pointer. Applied for both the CA bundle path and the SNI hostname.
+
+**Where:** [`requests/_tls.mojo`](requests/_tls.mojo) — `connect()` CA-bundle block
+(~L124-136) and SNI block (~L182-190). When debugging OpenSSL failures, drain the error
+queue with `ERR_get_error` + `ERR_error_string_n` (helper: `_drain_openssl_errors`).
+
+### 1.2 Strings built char-by-char from FFI bytes carry a rejected internal representation
+
+**Symptom:** A `String` assembled by `out += String(Codepoint(...))` (e.g. from `_getenv`)
+was rejected by OpenSSL when its `.unsafe_ptr()` was passed in.
+
+**Cause:** The incremental build leaves an internal representation whose `.unsafe_ptr()`
+points at something C libraries reject — the layout isn't the canonical contiguous form.
+
+**Fix:** Round-trip through `String() + x` to normalize the layout before handing the pointer
+to OpenSSL:
+
+```mojo
+resolved_path = String() + ca_bundle.value()   # normalize, then it's safe to unsafe_ptr()
+```
+
+**Where:** [`requests/_tls.mojo`](requests/_tls.mojo) — `connect()` trust-store resolution
+(~L100-117). Comment calls it out as a "Mojo String-build artifact observed in 1.0 beta".
+
+### 1.3 `external_call` JIT-crashes (does NOT raise) on a missing symbol
+
+**Symptom:** Needed to read `errno` portably. Tried `external_call["__error", ...]` (macOS)
+with a `try/except` fallback to `external_call["__errno_location", ...]` (Linux). The
+`except` branch never fired.
+
+**Cause:** `external_call` resolves the symbol at JIT time. If the symbol is missing, it
+does **not** raise a Mojo `Error` — it hard-crashes the JIT with `Failed to materialize
+symbols`. So you cannot probe for platform-specific libc symbols at runtime.
+
+**Fix:** Use a POSIX API that exists on **every** platform instead. For timeout detection
+we switched to `getsockopt(SO_ERROR)` (standard POSIX, resolves on both macOS and Linux)
+instead of the `__error`/`__errno_location` errno accessors.
+
+**Where:** [`requests/_net.mojo`](requests/_net.mojo) — `_is_timeout()` (~L162-185) and its
+docstring.
+
+---
+
+## 2. String slicing — interior-reference lifetime bugs
+
+### 2.1 Cannot slice a `String` and reassign to itself
+
+**Symptom:** Compiler error `use of invalidated interior reference` on patterns like
+`size_str = String(size_str[byte=0:semi])`.
+
+**Cause:** The RHS slice (`size_str[byte=...]`) holds an *interior reference* into `size_str`'s
+buffer. The LHS reassignment of `size_str` invalidates that origin before the slice is
+materialized — classic dangling-origin.
+
+**Fix:** Slice into a fresh local first, then assign:
+
+```mojo
+var sliced = String(size_str[byte=0:semi])   # fresh local
+size_str = sliced
+```
+
+**Where:** [`requests/_http.mojo`](requests/_http.mojo) `_dechunk` (~L220) and
+[`requests/_url.mojo`](requests/_url.mojo) `parse_url` (fragment/query slicing ~L84-92).
+This one surfaced specifically when CI ran a newer nightly (`dev2026072006`) — the older
+build had tolerated it.
+
+---
+
+## 3. Ownership, move semantics, and `Movable`
+
+### 3.1 `OwnedPointer[T]` requires `T` to be `Movable` (+ hand-written `__moveinit__`)
+
+**Symptom:** `OwnedPointer[Foo](foo^)` refused to compile for a `Foo` with a `__del__`.
+
+**Cause:** Mojo's `OwnedPointer` needs to move its payload, but a struct with a destructor
+doesn't get an auto-synthesized move constructor.
+
+**Fix:** Declare `struct Foo(Movable):` and hand-write `__moveinit__` — copy every field,
+then neuter the source's destructor side effects (set its `closed = True`, `fd = -1`, etc.).
+
+**Where:** [`requests/_streaming.mojo`](requests/_streaming.mojo) `StreamingConn.__moveinit__`
+(~L57-70) — the canonical worked example.
+
+### 3.2 `Optional[OwnedPointer[T]]` is not implicitly copyable — steal with `^`
+
+**Symptom:** Couldn't move a libssl handle out of an `Optional[OwnedPointer[OwnedDLHandle]]`.
+
+**Cause:** The `Optional[OwnedPointer[...]]` nesting makes the type non-`ImplicitlyCopyable`,
+and `.value()` returns a borrow, not an owned value.
+
+**Fix:** Steal the inner value and reset the source:
+
+```mojo
+var h = self._opt^
+self._opt = None
+return h^
+```
+
+**Where:** [`requests/_tls.mojo`](requests/_tls.mojo) `_steal_ssl` / `_steal_libssl` (~L274-288).
+
+### 3.3 `^` transfers ownership for every non-`ImplicitlyCopyable` type
+
+`Dict`, `Response`, `Optional[OwnedPointer]`, `CookieJar`, `List` — all require `^` at the
+use site when transferring. Call sites everywhere; documented in [`AGENTS.md`](AGENTS.md) and
+[`README.md`](README.md).
+
+### 3.4 Can't move a `Dict` field out of a struct while other fields are read
+
+**Symptom:** Wanted to move `parsed.headers` (a `Dict`) out and keep reading other fields of
+`parsed`. Compiler refused.
+
+**Cause:** `Dict` is non-copyable. Partial move of one field invalidates the struct, so you
+can't borrow siblings after moving one.
+
+**Fix:** Take the whole owning struct by value (`var parsed: ParsedResponse`) and move the
+whole thing; rebuild the `Dict` into a fresh one for the fields you still need.
+
+**Where:** [`requests/_http.mojo`](requests/_http.mojo) `_build_parsed` (~L160-167) and
+[`requests/session.mojo`](requests/session.mojo) `_build_response` (~L540-552). The docstrings
+spell this out as "avoids partial-move errors".
+
+### 3.5 `UnsafePointer` is non-nullable — null C-ABI args need `c_int(0)`
+
+For FFI null pointers (e.g. the `CApath` parameter of `SSL_CTX_load_verify_locations`), pass
+`c_int(0)` — the FFI shim widens it to a null pointer. **Where:** [`requests/_tls.mojo`](requests/_tls.mojo) (~L121, L159, L164).
+
+---
+
+## 4. The error / exception model — a design goal that's partially impossible
+
+The whole exception refactor (the last open roadmap item) ran head-first into four language
+limits. The intended design — *distinct typed structs per category AND runtime typed
+dispatch* — is **mutually exclusive** in this build. Full write-up in [`TODO.md`](TODO.md)
+"Implementation notes"; the short version:
+
+### 4.1 No multi-type `raises` union
+
+`raises A | B`, `raises A, B`, and `raises [A, B]` all fail to parse. A function that raises
+two categories (e.g. `parse_url` raises both `InvalidURL` and `UnsupportedScheme`) must stay
+bare `raises`.
+
+### 4.2 Strict typed propagation — `raises A` cannot call `raises B`
+
+Hard compiler error: `cannot call function that may raise 'B' in context that supports an
+error type of 'A'`. The Session orchestration layer (`_do_request` → `request` → `get`/`post`)
+fans out to 5+ disjoint error types, so it all stays bare `raises`.
+
+### 4.3 Same-`try`-block type unification
+
+A `try` block infers its exception type from its typed raisers and forbids coexistence with
+wider types. A typed `raises SSLError` call and a bare `raises` call **cannot share one try
+block**. Worked around by splitting the session's connect/send/recv try blocks per scheme
+(`is_https` branches each get their own try/except).
+
+**Where:** [`requests/session.mojo`](requests/session.mojo) (~L222-280) — there's a NOTE
+comment explaining the split.
+
+### 4.4 No runtime type recovery on a caught `Error`
+
+`__get_original_error_value_as[T]()` does not exist. A caught `Error` exposes no fields;
+`repr(e)` shows `Error('ConnectionError(msg=...)')` — the struct is stringified away.
+Concrete fields are accessible only within the same typed-`raises` context. Across a
+bare-`raises` boundary, only the rendered `write_to` string survives.
+
+### 4.5 Consequence — `exception_kind()` must stay string-prefix-based
+
+Because of 4.4, runtime dispatch is done by parsing the message prefix (`"SSLError: ..."`,
+`"HTTPError 404: ...`). Each exception struct's `write_to` emits a prefix pinned by a
+`comptime *_PREFIX` constant so the classifier and the structs can't drift.
+
+**Where:** [`requests/exceptions.mojo`](requests/exceptions.mojo) — module docstring (~L13-26)
+and `exception_kind()` docstring (~L164-173).
+
+### 4.6 Bonus: `Error` is a builtin struct, not a user trait
+
+You don't conform to `Error`; you `raise MyStruct(...)` and Mojo wraps it. A caught value is
+always the builtin `Error`. This is why 4.4 holds.
+
+### 4.7 Re-raise with `raise e^` to preserve the concrete type
+
+`Error` is not `ImplicitlyCopyable`, so `raise e` fails (`cannot be implicitly copied`). Use
+`raise e^` to transfer ownership — this preserves the concrete struct type through the `Error`
+wrapper (verified: the `write_to` renders the original struct). Applied as a behavior fix
+during the exception refactor: an SSL handshake failure during `s.get(...)` now surfaces as
+`SSLError: ...` instead of being flattened into `RequestException: SSLError: ...`.
+
+---
+
+## 5. DNS / networking — lazy init, heap-state-dependent flakiness
+
+### 5.1 `getaddrinfo` lazy-inits and fails on the very first resolve in a process
+
+**Symptom:** The first real DNS lookup in a fresh Mojo process intermittently fails.
+
+**Cause:** The libc resolver initializes lazily; the very first call can return failure on
+some systems. Combined with heap-state-dependent behavior in Mojo 1.0 beta.
+
+**Fix:** `Session.__init__` warms the resolver with a throwaway `_dns_resolve("localhost")`.
+Keep that priming call.
+
+**Where:** [`requests/session.mojo`](requests/session.mojo) (~L42-48).
+
+### 5.2 First contact with a real hostname can still hiccup → retry with backoff
+
+Even after warmup, the first lookup of an external hostname can fail transiently.
+`_resolve_by_name` retries up to **5 times** with exponential backoff (50/100/200/400ms via
+`nanosleep`). This was bumped from 3→5 after the macOS CI runner failed with the shorter
+retry.
+
+**Where:** [`requests/_dns.mojo`](requests/_dns.mojo) `_resolve_by_name` (~L73-81).
+
+### 5.3 Resolve DNS before header Dict allocations (ordering workaround)
+
+The session resolves DNS *before* building the header `Dict` and request string — because
+those allocations perturb the heap state in a way that can make `getaddrinfo` fail. The IP is
+resolved up front and passed directly to `connect`.
+
+**Where:** [`requests/session.mojo`](requests/session.mojo) `_do_request` (~L175-176).
+
+### 5.4 `gethostbyname` is unsafe (static buffer) → switched to `getaddrinfo`
+
+`gethostbyname` returns a pointer to a static buffer — not thread-safe. `getaddrinfo` is
+thread-safe and heap-allocated. This switch also fixed a heap-state-dependent DNS failure in
+the session flow.
+
+### 5.5 CI must not depend on external DNS/TLS — local server mandate
+
+GitHub-hosted macOS/Linux runners intermittently failed to resolve `example.com`. The test
+suite now runs a local HTTP+HTTPS server (`tests/server.py`, started by
+[`pixi run server`](pixi.toml)) and feeds `BASE_URL`/`HTTPS_BASE_URL`/`SSL_CERT_FILE` into the
+tests via env. **Do not introduce tests that require real outbound DNS/TLS.**
+
+**Where:** [`tests/server.py`](tests/server.py), [`.github/workflows/ci.yml`](.github/workflows/ci.yml),
+[`AGENTS.md`](AGENTS.md) CI section.
+
+---
+
+## 6. Missing stdlib
+
+### 6.1 No `std.json` → hand-written recursive-descent parser
+
+Mojo 1.0 has no `std.json`. We ship a minimal parser in [`requests/_json.mojo`](requests/_json.mojo).
+Because `JSONValue` is recursive (objects/arrays contain `JSONValue`s), the collection fields
+are heap-allocated behind `OwnedPointer` so the struct has a fixed, deletable layout.
+
+### 6.2 No `std.net` / `std.socket` → raw libc FFI
+
+Every socket operation is `external_call["socket"|"connect"|"send"|"recv"|"close"|"setsockopt", ...]`.
+No higher-level networking abstraction exists. See [`requests/_net.mojo`](requests/_net.mojo),
+[`requests/_dns.mojo`](requests/_dns.mojo).
+
+### 6.3 No mutable globals → each TLSConnection owns its own `dlopen` handle
+
+Mojo has no mutable module-level state. So we can't cache the libssl handle globally — each
+`TLSConnection` opens (and closes) its own `OwnedDLHandle`. There's a small cost but it's the
+only correct option.
+
+**Where:** [`requests/_tls.mojo`](requests/_tls.mojo) `_load_libssl` (~L306-333).
+
+### 6.4 No async/threading primitives → out of scope for now
+
+No `std.async`, no `Coroutine`, no `Thread`, no `async`/`await`. `pthread_create` via FFI
+needs C-ABI function pointers Mojo doesn't cleanly expose; `fork()` is process-level and
+awkward for sharing state. The verified-but-unbuilt path is non-blocking sockets + a `poll()`
+event loop — see [`TODO.md`](TODO.md) "Async support".
+
+### 6.5 Pure-Mojo TLS is explicitly out of scope
+
+Re-implementing TLS 1.3 (state machine, AEAD, X.509 path validation, constant-time crypto) in
+Mojo would dwarf the rest of the library. OpenSSL via FFI is battle-tested and
+auto-discovered. Struck through in [`TODO.md`](TODO.md).
+
+---
+
+## 7. Collections / iterators / deprecated syntax
+
+### 7.1 No clean way to return an iterable → `_ItemsRef` shim
+
+`Headers.items()` needs to hand back something iterable. There's no direct way to return an
+iterator over `Dict` entries, so we wrap it in a `_ItemsRef` helper struct.
+
+**Where:** [`requests/models.mojo`](requests/models.mojo) (~L56-58).
+
+### 7.2 `read` is deprecated → use `imm` for buffer access
+
+`build_request` originally used `read url: URL`. In current nightlies `read` is deprecated in
+this position; `imm` is the replacement.
+
+**Where:** [`requests/_http.mojo`](requests/_http.mojo) `build_request` signature (~L18-23).
+
+### 7.3 Can't move out of `Optional.value()` directly — copy bytes
+
+In `iter_content`, copying bytes out of a borrowed `Optional.value()` can't be done by moving
+— you copy element-by-element into a fresh `List`.
+
+**Where:** [`requests/models.mojo`](requests/models.mojo) (~L152).
+
+---
+
+## 8. Build / toolchain / CI
+
+### 8.1 Targeting a moving nightly
+
+Pinned to `>=1.0.0b3.dev2026071921,<2` in [`pixi.toml`](pixi.toml). A newer nightly
+(`dev2026072006`) surfaced the interior-reference bugs in §2.1. Older/newer builds may need
+small tweaks.
+
+### 8.2 `mojo format` is canonical and CI-enforced
+
+CI's `fmt-check` task runs `mojo format --quiet` then `git diff --exit-code` — it fails if any
+source diverges from canonical formatting. Always run `pixi run mojo format requests/ tests/ examples/`
+before committing.
+
+### 8.3 Per-invocation compile cost (~960 ms) dominates `mojo run`
+
+`mojo run` recompiles every time. For the benchmark, the fair comparison is a pre-built binary
+(`mojo build`); the `mojo run` row is shown for reference only and is ~13× slower purely from
+compile time. See [`README.md`](README.md) Benchmark section.
+
+### 8.4 Local `requests/` dir shadows pip's `requests` for Python benchmarks
+
+The Python benchmark scripts must run from `/tmp` (or be copied there) — otherwise the local
+Mojo `requests/` package dir shadows pip's `requests`.
+
+**Where:** [`benchmark/run.sh`](benchmark/run.sh) (~L58, L70).
+
+### 8.5 No platform-detection builtin in this build
+
+`std.sys.info.is_apple` / `is_linux` / `is_macos` (from the GPU skill docs) **do not exist**
+in this stdlib build. `target_os`, `__is_macosx`, `OS.macOS` — none of them resolve either.
+There also appears to be no `compiles(...)` intrinsic for guarding speculative calls. This is
+why §1.3's portable errno detection had to use a universally-available POSIX API instead.
+
+---
+
+## 9. OpenSSL-via-FFI ergonomics (Mojo-shaped friction)
+
+Not pure Mojo bugs, but friction worth recording:
+
+- **`SSL_set_tlsext_host_name` is a macro** → must call `SSL_ctrl(ssl, 55, 0, hostname)`
+  directly. Many servers refuse TLS without SNI. ([`_tls.mojo`](requests/_tls.mojo) ~L181)
+- **OpenSSL constants must be `comptime c_int`** to pass cleanly through `OwnedDLHandle.call`.
+  Same pattern in `_net.mojo`, `_dns.mojo`, `_streaming.mojo`.
+- **Calls go through `self._libssl.value()[].call["SYMBOL", RetType](args...)`** and the handle
+  must be stored as `OwnedPointer[OwnedDLHandle]` on the `TLSConnection` so it outlives the ctx.
+- **`_drain_openssl_errors` exists** because `external_call` failures are otherwise opaque —
+  a bare `rc=0` tells you nothing. The helper reads `ERR_get_error` + `ERR_error_string_n`.
+
+---
+
+## 10. Deliberate simplifications (not bugs, but limitations shaped by Mojo's state)
+
+These are called out so they don't get reported as bugs:
+
+- **Set-Cookie attributes are not parsed** — minimal v1 reads `name=value`, ignores
+  Path/Domain/Expires/Secure/HttpOnly. ([`_cookies.mojo`](requests/_cookies.mojo),
+  [`TODO.md`](TODO.md))
+- **Streaming + redirects don't combine** — when `stream=True`, redirects are not followed
+  (matches Python's caveat). ([`session.mojo`](requests/session.mojo) ~L107)
+- **Incremental chunked dechunking is not implemented** — streaming a chunked body reads until
+  close instead. ([`_streaming.mojo`](requests/_streaming.mojo) ~L80)
+
+---
+
+## How to debug when something goes wrong
+
+1. **OpenSSL failure with `rc=0` / weird error** → it's probably §1.1 (unsafe_ptr clobber).
+   Drain the error queue (`_drain_openssl_errors`) and check whether you passed a raw
+   `String.unsafe_ptr()` where you should've passed an `alloc`'d buffer.
+2. **`use of invalidated interior reference`** → §2.1. Slice into a fresh local first.
+3. **`cannot be implicitly copied`** → §3.2/§3.3. Add `^` at the use site.
+4. **`cannot call function that may raise 'X' in context that supports 'Y'`** → §4.2/§4.3.
+   Either keep the caller bare `raises`, or split the try block.
+5. **First-request DNS failure** → §5.1/§5.2. The warmup + retry should handle it; if not,
+   you're probably hitting a real resolver issue.
+6. **JIT crash on an `external_call`** → §1.3. The symbol doesn't exist on this platform;
+   switch to a universally-available POSIX API.
+
+---
+
+## Contributing to this file
+
+Found a new Mojo struggle? Add it. Format: **Symptom / Cause / Fix / Where**. Be specific
+about the Mojo build (the behavior may be fixed in a future nightly). If you worked around it
+in code, point at the file:line so the workaround and the rationale stay linked.
