@@ -44,6 +44,13 @@ struct AddrInfo:
     var ai_next: UInt64
 
 
+# Minimal mirror of `struct timespec { time_t tv_sec; long tv_nsec; }` for nanosleep.
+@fieldwise_init
+struct Timespec:
+    var tv_sec: Int64
+    var tv_nsec: Int64
+
+
 def resolve(host: String) raises -> UInt32:
     """Resolve a host string to an IPv4 address (host byte order).
 
@@ -65,6 +72,11 @@ def resolve(host: String) raises -> UInt32:
 
 def _resolve_by_name(host: String) raises -> UInt32:
     """Resolve a hostname via libc ``getaddrinfo`` (thread-safe, heap-allocated — unlike gethostbyname).
+
+    Retries up to 3 times with a short sleep: the first ``getaddrinfo`` in a fresh process can
+    fail transiently on some systems (lazy resolver init / heap-state-dependent behavior observed
+    in Mojo 1.0 beta). The caller's Session also warms up with a localhost resolve, but network
+    resolvers can still hiccup on first contact with a real hostname.
     """
     var hints = alloc[AddrInfo](1)
     hints[].ai_flags = 0
@@ -78,12 +90,27 @@ def _resolve_by_name(host: String) raises -> UInt32:
 
     var result_addr = alloc[UnsafePointer[AddrInfo, MutUntrackedOrigin]](1)
 
-    var rc = external_call["getaddrinfo", c_int](
-        host.unsafe_ptr(),
-        c_int(0),  # service = NULL (we only want address resolution, not port)
-        hints,
-        result_addr,
-    )
+    var rc = c_int(-1)
+    var attempt = 0
+    while attempt < 3:
+        rc = external_call["getaddrinfo", c_int](
+            host.unsafe_ptr(),
+            c_int(
+                0
+            ),  # service = NULL (we only want address resolution, not port)
+            hints,
+            result_addr,
+        )
+        if rc == c_int(0):
+            break
+        # Brief backoff: 5ms, 25ms. nanosleep via libc {sec=0, nsec=N}.
+        var req = alloc[Timespec](1)
+        req[].tv_sec = 0
+        req[].tv_nsec = Int64(5_000_000 * (attempt + 1))
+        _ = external_call["nanosleep", c_int](req, 0)
+        req.free()
+        attempt += 1
+
     hints.free()
     if rc != c_int(0):
         result_addr.free()

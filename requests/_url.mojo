@@ -82,13 +82,15 @@ def parse_url(raw: String) raises -> URL:
     var frag_pos = _find(rest, "#")
     if frag_pos >= 0:
         u.fragment = String(rest[byte = frag_pos + 1 :])
-        rest = String(rest[byte=0:frag_pos])
+        var sliced = String(rest[byte=0:frag_pos])
+        rest = sliced
 
     # query
     var q_pos = _find(rest, "?")
     if q_pos >= 0:
         u.query = String(rest[byte = q_pos + 1 :])
-        rest = String(rest[byte=0:q_pos])
+        var sliced = String(rest[byte=0:q_pos])
+        rest = sliced
 
     # path
     var p_pos = _find(rest, "/")

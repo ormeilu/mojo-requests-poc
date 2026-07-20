@@ -219,7 +219,8 @@ def _dechunk(raw: List[UInt8], body_start: Int) raises -> List[UInt8]:
         # Strip any chunk extensions (";...")
         var semi = _find(size_str, ";")
         if semi >= 0:
-            size_str = String(size_str[byte=0:semi])
+            var sliced = String(size_str[byte=0:semi])
+            size_str = sliced
         size_str = _strip(size_str)
         var size = _parse_hex(size_str)
         if size == None:
