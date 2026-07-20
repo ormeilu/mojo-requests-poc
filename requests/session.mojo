@@ -28,12 +28,18 @@ struct Session:
 
     var headers: Dict[String, String]
     var cookies: CookieJar
+    var verify: Bool
+    var ca_bundle: Optional[String]
 
     def __init__(out self):
         self.headers = {}
         self.headers["User-Agent"] = "mojo-requests/0.1"
         self.headers["Accept"] = "*/*"
         self.cookies = CookieJar()
+        # TLS defaults: verify peers against the system trust store (overridable per-call
+        # and per-Session via the verify/ca_bundle parameters).
+        self.verify = True
+        self.ca_bundle = None
         # Warm up the DNS resolver: the first getaddrinfo call in a process can fail on some
         # systems (lazy resolver init). Doing a throwaway resolve here primes it for real use.
         try:
@@ -52,6 +58,8 @@ struct Session:
         timeout: Optional[Float64] = None,
         allow_redirects: Bool = True,
         stream: Bool = False,
+        verify: Optional[Bool] = None,
+        ca_bundle: Optional[String] = None,
     ) raises -> Response:
         """Issue an HTTP request and return a Response.
 
@@ -63,11 +71,24 @@ struct Session:
         - ``allow_redirects``: follow 3xx redirects (default True). Ignored when ``stream=True``.
         - ``stream``: if True, return a Response whose body is read lazily via iter_content().
           The connection stays open until the Response is dropped.
+        - ``verify``: override the Session-level TLS verification setting for this call.
+          None (default) uses self.verify; True verifies peers; False disables verification.
+        - ``ca_bundle``: override the Session-level CA bundle path for this call. When None
+          (default), the trust store is resolved from $REQUESTS_CA_BUNDLE / $SSL_CERT_FILE /
+          system defaults — see TLSConnection.connect.
         """
         var current_url = url
         var redirect_method = method
         var current_data = data
         var current_json = json
+
+        # Resolve effective verify/ca_bundle: per-call override > Session-level default.
+        var eff_verify = self.verify
+        if verify != None:
+            eff_verify = verify.value()
+        var eff_ca_bundle = ca_bundle
+        if eff_ca_bundle == None:
+            eff_ca_bundle = self.ca_bundle
 
         # First request: consumes params (owned). Subsequent redirects pass None for params.
         var resp = self._do_request(
@@ -79,6 +100,8 @@ struct Session:
             current_json,
             timeout,
             stream,
+            eff_verify,
+            eff_ca_bundle,
         )
 
         comptime MAX_REDIRECTS = 30
@@ -122,6 +145,8 @@ struct Session:
                 current_json,
                 timeout,
                 False,
+                eff_verify,
+                eff_ca_bundle,
             )
 
         raise request_exception("too many redirects (max 30)")
@@ -136,6 +161,8 @@ struct Session:
         json: Optional[String],
         timeout: Optional[Float64],
         stream: Bool,
+        verify: Bool,
+        ca_bundle: Optional[String],
     ) raises -> Response:
         """Perform a single HTTP request (no redirect following).
 
@@ -200,7 +227,7 @@ struct Session:
         try:
             sock.connect_ip(ip, port, timeout)
             if is_https:
-                tls.connect(sock.fd_value(), host)
+                tls.connect(sock.fd_value(), host, verify, ca_bundle)
             connected = True
         except e:
             connect_err = String(e)
@@ -346,6 +373,8 @@ struct Session:
         timeout: Optional[Float64] = None,
         allow_redirects: Bool = True,
         stream: Bool = False,
+        verify: Optional[Bool] = None,
+        ca_bundle: Optional[String] = None,
     ) raises -> Response:
         return self.request(
             "GET",
@@ -355,6 +384,8 @@ struct Session:
             timeout=timeout,
             allow_redirects=allow_redirects,
             stream=stream,
+            verify=verify,
+            ca_bundle=ca_bundle,
         )
 
     def post(
@@ -365,6 +396,8 @@ struct Session:
         headers: Optional[Dict[String, String]] = None,
         timeout: Optional[Float64] = None,
         allow_redirects: Bool = True,
+        verify: Optional[Bool] = None,
+        ca_bundle: Optional[String] = None,
     ) raises -> Response:
         return self.request(
             "POST",
@@ -374,6 +407,8 @@ struct Session:
             json=json,
             timeout=timeout,
             allow_redirects=allow_redirects,
+            verify=verify,
+            ca_bundle=ca_bundle,
         )
 
     def put(
@@ -384,6 +419,8 @@ struct Session:
         headers: Optional[Dict[String, String]] = None,
         timeout: Optional[Float64] = None,
         allow_redirects: Bool = True,
+        verify: Optional[Bool] = None,
+        ca_bundle: Optional[String] = None,
     ) raises -> Response:
         return self.request(
             "PUT",
@@ -393,6 +430,8 @@ struct Session:
             json=json,
             timeout=timeout,
             allow_redirects=allow_redirects,
+            verify=verify,
+            ca_bundle=ca_bundle,
         )
 
     def patch(
@@ -403,6 +442,8 @@ struct Session:
         headers: Optional[Dict[String, String]] = None,
         timeout: Optional[Float64] = None,
         allow_redirects: Bool = True,
+        verify: Optional[Bool] = None,
+        ca_bundle: Optional[String] = None,
     ) raises -> Response:
         return self.request(
             "PATCH",
@@ -412,6 +453,8 @@ struct Session:
             json=json,
             timeout=timeout,
             allow_redirects=allow_redirects,
+            verify=verify,
+            ca_bundle=ca_bundle,
         )
 
     def delete(
@@ -420,6 +463,8 @@ struct Session:
         headers: Optional[Dict[String, String]] = None,
         timeout: Optional[Float64] = None,
         allow_redirects: Bool = True,
+        verify: Optional[Bool] = None,
+        ca_bundle: Optional[String] = None,
     ) raises -> Response:
         return self.request(
             "DELETE",
@@ -427,6 +472,8 @@ struct Session:
             headers=headers,
             timeout=timeout,
             allow_redirects=allow_redirects,
+            verify=verify,
+            ca_bundle=ca_bundle,
         )
 
     def head(
@@ -435,6 +482,8 @@ struct Session:
         headers: Optional[Dict[String, String]] = None,
         timeout: Optional[Float64] = None,
         allow_redirects: Bool = True,
+        verify: Optional[Bool] = None,
+        ca_bundle: Optional[String] = None,
     ) raises -> Response:
         return self.request(
             "HEAD",
@@ -442,6 +491,8 @@ struct Session:
             headers=headers,
             timeout=timeout,
             allow_redirects=allow_redirects,
+            verify=verify,
+            ca_bundle=ca_bundle,
         )
 
     def options(
@@ -450,6 +501,8 @@ struct Session:
         headers: Optional[Dict[String, String]] = None,
         timeout: Optional[Float64] = None,
         allow_redirects: Bool = True,
+        verify: Optional[Bool] = None,
+        ca_bundle: Optional[String] = None,
     ) raises -> Response:
         return self.request(
             "OPTIONS",
@@ -457,6 +510,8 @@ struct Session:
             headers=headers,
             timeout=timeout,
             allow_redirects=allow_redirects,
+            verify=verify,
+            ca_bundle=ca_bundle,
         )
 
 

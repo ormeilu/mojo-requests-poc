@@ -16,6 +16,8 @@ def request(
     timeout: Optional[Float64] = None,
     allow_redirects: Bool = True,
     stream: Bool = False,
+    verify: Optional[Bool] = None,
+    ca_bundle: Optional[String] = None,
 ) raises -> Response:
     """Send an HTTP request and return a Response."""
     var s = Session()
@@ -29,6 +31,8 @@ def request(
         timeout=timeout,
         allow_redirects=allow_redirects,
         stream=stream,
+        verify=verify,
+        ca_bundle=ca_bundle,
     )
 
 
@@ -39,6 +43,8 @@ def get(
     timeout: Optional[Float64] = None,
     allow_redirects: Bool = True,
     stream: Bool = False,
+    verify: Optional[Bool] = None,
+    ca_bundle: Optional[String] = None,
 ) raises -> Response:
     """Send an HTTP GET request."""
     var s = Session()
@@ -49,6 +55,8 @@ def get(
         timeout=timeout,
         allow_redirects=allow_redirects,
         stream=stream,
+        verify=verify,
+        ca_bundle=ca_bundle,
     )
 
 
@@ -58,10 +66,20 @@ def post(
     json: Optional[String] = None,
     headers: Optional[Dict[String, String]] = None,
     timeout: Optional[Float64] = None,
+    verify: Optional[Bool] = None,
+    ca_bundle: Optional[String] = None,
 ) raises -> Response:
     """Send an HTTP POST request."""
     var s = Session()
-    return s.post(url, data=data, json=json, headers=headers, timeout=timeout)
+    return s.post(
+        url,
+        data=data,
+        json=json,
+        headers=headers,
+        timeout=timeout,
+        verify=verify,
+        ca_bundle=ca_bundle,
+    )
 
 
 def put(
@@ -70,10 +88,20 @@ def put(
     json: Optional[String] = None,
     headers: Optional[Dict[String, String]] = None,
     timeout: Optional[Float64] = None,
+    verify: Optional[Bool] = None,
+    ca_bundle: Optional[String] = None,
 ) raises -> Response:
     """Send an HTTP PUT request."""
     var s = Session()
-    return s.put(url, data=data, json=json, headers=headers, timeout=timeout)
+    return s.put(
+        url,
+        data=data,
+        json=json,
+        headers=headers,
+        timeout=timeout,
+        verify=verify,
+        ca_bundle=ca_bundle,
+    )
 
 
 def patch(
@@ -82,37 +110,71 @@ def patch(
     json: Optional[String] = None,
     headers: Optional[Dict[String, String]] = None,
     timeout: Optional[Float64] = None,
+    verify: Optional[Bool] = None,
+    ca_bundle: Optional[String] = None,
 ) raises -> Response:
     """Send an HTTP PATCH request."""
     var s = Session()
-    return s.patch(url, data=data, json=json, headers=headers, timeout=timeout)
+    return s.patch(
+        url,
+        data=data,
+        json=json,
+        headers=headers,
+        timeout=timeout,
+        verify=verify,
+        ca_bundle=ca_bundle,
+    )
 
 
 def delete(
     url: String,
     headers: Optional[Dict[String, String]] = None,
     timeout: Optional[Float64] = None,
+    verify: Optional[Bool] = None,
+    ca_bundle: Optional[String] = None,
 ) raises -> Response:
     """Send an HTTP DELETE request."""
     var s = Session()
-    return s.delete(url, headers=headers, timeout=timeout)
+    return s.delete(
+        url,
+        headers=headers,
+        timeout=timeout,
+        verify=verify,
+        ca_bundle=ca_bundle,
+    )
 
 
 def head(
     url: String,
     headers: Optional[Dict[String, String]] = None,
     timeout: Optional[Float64] = None,
+    verify: Optional[Bool] = None,
+    ca_bundle: Optional[String] = None,
 ) raises -> Response:
     """Send an HTTP HEAD request."""
     var s = Session()
-    return s.head(url, headers=headers, timeout=timeout)
+    return s.head(
+        url,
+        headers=headers,
+        timeout=timeout,
+        verify=verify,
+        ca_bundle=ca_bundle,
+    )
 
 
 def options(
     url: String,
     headers: Optional[Dict[String, String]] = None,
     timeout: Optional[Float64] = None,
+    verify: Optional[Bool] = None,
+    ca_bundle: Optional[String] = None,
 ) raises -> Response:
     """Send an HTTP OPTIONS request."""
     var s = Session()
-    return s.options(url, headers=headers, timeout=timeout)
+    return s.options(
+        url,
+        headers=headers,
+        timeout=timeout,
+        verify=verify,
+        ca_bundle=ca_bundle,
+    )

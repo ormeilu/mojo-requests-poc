@@ -7,12 +7,13 @@
 # libssl is auto-discovered at runtime (no hard-coded paths) and dlopen'd via OwnedDLHandle. The TLS
 # layer is C (OpenSSL); the rest of the library remains pure Mojo.
 
-from std.ffi import OwnedDLHandle, c_int
+from std.ffi import OwnedDLHandle, c_int, external_call
 from std.memory import alloc, OwnedPointer
 from .exceptions import ssl_error
 
 
 # OpenSSL constants (comptime c_int so they pass cleanly to OwnedDLHandle.call).
+comptime SSL_VERIFY_NONE: c_int = 0
 comptime SSL_VERIFY_PEER: c_int = 1
 comptime SSL_CTRL_SET_TLSEXT_HOSTNAME: c_int = 55
 comptime TLSEXT_NAMETYPE_host_name: c_int = 0
@@ -47,11 +48,24 @@ struct TLSConnection:
     def __del__(deinit self):
         self.close()
 
-    def connect(mut self, sock_fd: c_int, hostname: String) raises:
+    def connect(
+        mut self,
+        sock_fd: c_int,
+        hostname: String,
+        verify: Bool = True,
+        ca_bundle: Optional[String] = None,
+    ) raises:
         """Perform the TLS handshake over an already-connected socket.
 
         - ``sock_fd``: the connected raw socket fd (from TCPSocket.fd_value()).
         - ``hostname``: used for SNI and certificate verification.
+        - ``verify``: when True (default), verify the peer certificate against the trust store.
+          When False, skip certificate verification (insecure — use only for testing).
+        - ``ca_bundle``: optional path to a PEM file of trusted CA certificates. When set,
+          overrides the system trust store. When None, the trust store is resolved in this
+          priority order: explicit ca_bundle > $REQUESTS_CA_BUNDLE env var > $SSL_CERT_FILE
+          env var > OpenSSL system defaults (``SSL_CTX_set_default_verify_paths``).
+
         Raises ``ssl_error`` on any failure (missing libssl, handshake failure, cert rejection).
         """
         var libssl = _load_libssl()
@@ -76,14 +90,79 @@ struct TLSConnection:
             raise ssl_error("SSL_CTX_new returned NULL")
         self._ctx = ctx
 
-        # Use the system default CA paths for verification.
-        _ = self._libssl.value()[].call[
-            "SSL_CTX_set_default_verify_paths", c_int
-        ](ctx)
-        # Enable peer (certificate) verification.
-        _ = self._libssl.value()[].call["SSL_CTX_set_verify", c_int](
-            ctx, SSL_VERIFY_PEER, c_int(0)
-        )
+        if verify:
+            # Resolve the CA trust store in priority order:
+            #   1. explicit ca_bundle parameter
+            #   2. $REQUESTS_CA_BUNDLE env var (matches python requests)
+            #   3. $SSL_CERT_FILE env var (OpenSSL's native convention)
+            #   4. system default paths via SSL_CTX_set_default_verify_paths
+            #
+            # The chosen bundle path is materialized as an owned String (`resolved_path`)
+            # whose backing memory lives for the duration of the SSL_CTX_load_verify_locations
+            # call. Strings built char-by-char in _getenv can carry an internal representation
+            # whose .unsafe_ptr() OpenSSL rejects; round-tripping through `String() + x`
+            # normalizes the layout. (Mojo String-build artifact observed in 1.0 beta.)
+            var env_rb = _getenv("REQUESTS_CA_BUNDLE")
+            var env_sc = _getenv("SSL_CERT_FILE")
+            var have_path = False
+            var resolved_path = String()
+            if ca_bundle != None:
+                resolved_path = String() + ca_bundle.value()
+                have_path = True
+            elif env_rb.byte_length() > 0:
+                resolved_path = String() + env_rb
+                have_path = True
+            elif env_sc.byte_length() > 0:
+                resolved_path = String() + env_sc
+                have_path = True
+
+            if have_path:
+                # Explicit bundle: load ONLY this file (overrides system defaults).
+                # SSL_CTX_load_verify_locations(SSL_CTX*, const char *CAfile, const char *CApath)
+                # — pass a null CApath (we only want the file form). c_int(0) widens to a null
+                # pointer when the FFI shim materializes the C-ABI argument.
+                #
+                # Copy the path into a separately-allocated, NUL-terminated buffer that we
+                # manage explicitly. A Mojo String's unsafe_ptr() can become unreliable when
+                # passed through the FFI shim after other heap activity (observed in Mojo
+                # 1.0 beta): the bytes the runtime sees when materializing the C-ABI argument
+                # are correct, but the buffer OpenSSL later dereferences inside BIO_new_file
+                # can be clobbered. Allocating our own buffer sidesteps this entirely.
+                var path_bytes = resolved_path.byte_length()
+                var cpath = alloc[UInt8](path_bytes + 1)
+                var src = resolved_path.unsafe_ptr()
+                for i in range(path_bytes):
+                    cpath[i] = src[i]
+                cpath[path_bytes] = 0
+                # Clear the OpenSSL error queue so any failure we see is unambiguously ours.
+                _ = self._libssl.value()[].call["ERR_clear_error", c_int]()
+                var rc = self._libssl.value()[].call[
+                    "SSL_CTX_load_verify_locations", c_int
+                ](ctx, cpath, c_int(0))
+                cpath.free()
+                if rc != c_int(1):
+                    var derr = _drain_openssl_errors(self._libssl.value()[])
+                    raise ssl_error(
+                        String(
+                            t"failed to load CA bundle:"
+                            t" {resolved_path} ({derr})"
+                        )
+                    )
+            else:
+                # Fall back to OpenSSL's compiled-in default paths. This also lets OpenSSL
+                # itself honor SSL_CERT_FILE / SSL_CERT_DIR at lookup time on most platforms.
+                _ = self._libssl.value()[].call[
+                    "SSL_CTX_set_default_verify_paths", c_int
+                ](ctx)
+            # Enable peer (certificate) verification.
+            _ = self._libssl.value()[].call["SSL_CTX_set_verify", c_int](
+                ctx, SSL_VERIFY_PEER, c_int(0)
+            )
+        else:
+            # Insecure: disable peer verification entirely.
+            _ = self._libssl.value()[].call["SSL_CTX_set_verify", c_int](
+                ctx, SSL_VERIFY_NONE, c_int(0)
+            )
 
         var ssl = self._libssl.value()[].call[
             "SSL_new", UnsafePointer[UInt8, MutUntrackedOrigin]
@@ -101,12 +180,21 @@ struct TLSConnection:
 
         # SNI: SSL_set_tlsext_host_name is a macro -> SSL_ctrl(ssl, 55, 0, hostname).
         # Many CDNs/servers refuse TLS without SNI, so this is mandatory.
+        # Copy the hostname into an explicitly-managed NUL-terminated buffer for the same
+        # reason as the CA bundle path above — see the comment near SSL_CTX_load_verify_locations.
+        var host_bytes = hostname.byte_length()
+        var chost = alloc[UInt8](host_bytes + 1)
+        var host_src = hostname.unsafe_ptr()
+        for i in range(host_bytes):
+            chost[i] = host_src[i]
+        chost[host_bytes] = 0
         var sni_rc = self._libssl.value()[].call["SSL_ctrl", c_int](
             ssl,
             SSL_CTRL_SET_TLSEXT_HOSTNAME,
             TLSEXT_NAMETYPE_host_name,
-            hostname.unsafe_ptr(),
+            chost,
         )
+        chost.free()
         if sni_rc != c_int(1):
             raise ssl_error(
                 String(t"SNI (SSL_set_tlsext_host_name) failed for {hostname}")
@@ -245,6 +333,24 @@ def _load_libssl() raises -> OwnedDLHandle:
     raise ssl_error(String(t"could not find libssl. Tried: {tried}"))
 
 
+# --- env var access (libc getenv via FFI) ---------------------------------
+
+
+def _getenv(name: String) -> String:
+    """Read an environment variable via libc ``getenv``. Returns "" if unset."""
+    var ptr = external_call["getenv", UnsafePointer[UInt8, MutUntrackedOrigin]](
+        name.unsafe_ptr()
+    )
+    if Int(ptr) == 0:
+        return ""
+    var out = String()
+    var i = 0
+    while ptr[i] != 0:
+        out += String(Codepoint(unsafe_unchecked_codepoint=UInt32(ptr[i])))
+        i += 1
+    return out
+
+
 # --- error diagnostics ----------------------------------------------------
 
 
@@ -261,3 +367,35 @@ def _get_ssl_error(
     if code == SSL_ERROR_SYSCALL:
         return "underlying socket I/O error"
     return String(t"SSL_get_error={code}")
+
+
+def _drain_openssl_errors(ref libssl: OwnedDLHandle) -> String:
+    """Drain OpenSSL's per-thread error queue and return a concatenated diagnostic string.
+
+    Used after a failed SSL_CTX_* call to surface the actual OpenSSL reason code instead
+    of a bare "rc=0". Returns "[no error queued]" if the queue is empty (which itself is
+    informative — it means the call rejected without pushing to the queue).
+    """
+    var buf = alloc[UInt8](256)
+    var out = String()
+    var first = True
+    var count = 0
+    while count < 8:
+        var e = libssl.call["ERR_get_error", UInt64]()
+        if e == UInt64(0):
+            break
+        _ = libssl.call["ERR_error_string_n", c_int](e, buf, c_int(256))
+        var msg = String()
+        var i = 0
+        while buf[i] != 0 and i < 256:
+            msg += String(Codepoint(unsafe_unchecked_codepoint=UInt32(buf[i])))
+            i += 1
+        if not first:
+            out += " | "
+        first = False
+        out += String(t"[{e}] {msg}")
+        count += 1
+    buf.free()
+    if first:
+        return "[no error queued]"
+    return out^

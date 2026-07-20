@@ -16,7 +16,7 @@ percent-encoding, and a JSON parser — is written in Mojo.
 # Clone, then enter the environment
 pixi shell
 
-# Run the test suite (30 tests: 16 HTTP + 8 HTTPS + 6 streaming)
+# Run the test suite (33 tests: 16 HTTP + 11 HTTPS + 6 streaming)
 pixi run test                # core HTTP / URL / JSON tests
 pixi run test-https          # HTTPS-specific tests
 pixi run test-streaming      # stream=True + iter_content (live network)
@@ -82,17 +82,20 @@ All mirror Python's `requests`:
 
 | Function  | Signature |
 |-----------|-----------|
-| `get`     | `(url, params?, headers?, timeout?)` |
-| `post`    | `(url, data?, json?, headers?, timeout?)` |
-| `put`     | `(url, data?, json?, headers?, timeout?)` |
-| `patch`   | `(url, data?, json?, headers?, timeout?)` |
-| `delete`  | `(url, headers?, timeout?)` |
-| `head`    | `(url, headers?, timeout?)` |
-| `options` | `(url, headers?, timeout?)` |
-| `request` | `(method, url, params?, headers?, data?, json?, timeout?)` |
+| `get`     | `(url, params?, headers?, timeout?, verify?, ca_bundle?)` |
+| `post`    | `(url, data?, json?, headers?, timeout?, verify?, ca_bundle?)` |
+| `put`     | `(url, data?, json?, headers?, timeout?, verify?, ca_bundle?)` |
+| `patch`   | `(url, data?, json?, headers?, timeout?, verify?, ca_bundle?)` |
+| `delete`  | `(url, headers?, timeout?, verify?, ca_bundle?)` |
+| `head`    | `(url, headers?, timeout?, verify?, ca_bundle?)` |
+| `options` | `(url, headers?, timeout?, verify?, ca_bundle?)` |
+| `request` | `(method, url, params?, headers?, data?, json?, timeout?, verify?, ca_bundle?)` |
 
 Arguments are keyword-friendly with `Optional[...] = None` defaults. Collection args (`params`, `headers`)
 are consumed (transferred with `^`) since Mojo's `Dict` is not implicitly copyable.
+
+The `verify` / `ca_bundle` parameters (and the matching `Session` fields) control TLS certificate
+verification — see [TLS verification](#tls-verification) below.
 
 ### `Session`
 
@@ -147,6 +150,47 @@ try:
 except e:
     var kind = exception_kind(e)   # "ConnectionError" | "Timeout" | "HTTPError" | "SSLError" | ...
     print("failed:", kind, e)
+```
+
+## TLS verification
+
+HTTPS certificate verification is **on by default** (peer certs are checked against the system trust
+store via OpenSSL). Two parameters — available on every request function, every `Session` method, and
+as fields on `Session` itself — let you customize this:
+
+| Parameter    | Type                | Default | Meaning |
+|--------------|---------------------|---------|---------|
+| `verify`     | `Optional[Bool]`    | `None`  | `None` uses the Session default; `True` verifies peers; `False` disables verification entirely (insecure). |
+| `ca_bundle`  | `Optional[String]`  | `None`  | Path to a PEM file of trusted CA certificates. Overrides the system trust store. |
+
+When `verify=True` and no explicit `ca_bundle` is given, the trust store is resolved in this priority
+order (mirrors Python `requests` semantics):
+
+1. the `ca_bundle` argument (highest priority)
+2. `$REQUESTS_CA_BUNDLE` environment variable
+3. `$SSL_CERT_FILE` environment variable (OpenSSL's native convention)
+4. OpenSSL's compiled-in system default paths
+
+```mojo
+# Per-call: trust a specific self-signed cert (e.g. a local test server).
+var r = requests.get("https://localhost:8443/", ca_bundle="/path/to/cert.pem")
+
+# Per-call: skip verification entirely (insecure — testing only).
+var r2 = requests.get("https://self-signed.example/", verify=False)
+
+# Session-wide default, overridable per-call.
+var s = requests.Session()
+s.verify = False            # default for every request on this Session
+var r3 = s.get("https://internal.corp/", verify=True)   # re-enable for this one
+```
+
+On CI / minimal Linux images where the system trust store path differs from OpenSSL's defaults, the
+cleanest fix is usually the env var — no code changes required:
+
+```bash
+export REQUESTS_CA_BUNDLE=/etc/ssl/certs/ca-certificates.crt
+# or:
+export SSL_CERT_FILE=/etc/ssl/certs/ca-certificates.crt
 ```
 
 ## How it works
@@ -240,6 +284,7 @@ Full results are exported to `benchmark/results.md` on each run.
 - [x] Redirect following (`allow_redirects`, 3xx, supports absolute/protocol-relative/root-relative/relative)
 - [x] Cookie jar persistence across requests in a `Session`
 - [x] Streaming responses (`stream=True` + `iter_content(chunk_size)`)
+- [x] TLS verification controls: `verify=False`, `ca_bundle` param, `REQUESTS_CA_BUNDLE` / `SSL_CERT_FILE` env vars
 
 ## License
 
