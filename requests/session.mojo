@@ -5,13 +5,16 @@
 # The module-level API in api.mojo delegates to a default Session.
 
 from ._url import parse_url, build_query_string, url_encode
-from ._http import build_request, parse_response, ParsedResponse
+from ._http import build_request, parse_response, parse_headers, ParsedResponse
 from ._net import TCPSocket
 from ._dns import resolve as _dns_resolve
 from ._tls import TLSConnection
 from ._cookies import CookieJar
+from ._streaming import StreamingConn
 from .models import Response, Headers
 from .exceptions import request_exception
+from std.memory import OwnedPointer
+from std.ffi import c_int, OwnedDLHandle
 
 
 struct Session:
@@ -47,6 +50,7 @@ struct Session:
         json: Optional[String] = None,
         timeout: Optional[Float64] = None,
         allow_redirects: Bool = True,
+        stream: Bool = False,
     ) raises -> Response:
         """Issue an HTTP request and return a Response.
 
@@ -55,7 +59,9 @@ struct Session:
         - ``data``: raw request body (form-encoded string, etc.).
         - ``json``: JSON body string (also sets Content-Type: application/json).
         - ``timeout``: per-call connect/send/recv timeout in seconds.
-        - ``allow_redirects``: follow 3xx redirects (default True). Up to MAX_REDIRECTS hops.
+        - ``allow_redirects``: follow 3xx redirects (default True). Ignored when ``stream=True``.
+        - ``stream``: if True, return a Response whose body is read lazily via iter_content().
+          The connection stays open until the Response is dropped.
         """
         var current_url = url
         var redirect_method = method
@@ -63,10 +69,11 @@ struct Session:
         var current_json = json
 
         # First request: consumes params (owned). Subsequent redirects pass None for params.
-        var resp = self._do_request(redirect_method, current_url, params^, headers, current_data, current_json, timeout)
+        var resp = self._do_request(redirect_method, current_url, params^, headers, current_data, current_json, timeout, stream)
 
         comptime MAX_REDIRECTS = 30
-        if not allow_redirects:
+        # Streaming responses are returned as-is (no redirect following; connection stays open).
+        if stream or not allow_redirects:
             return resp^
 
         for _ in range(MAX_REDIRECTS):
@@ -93,9 +100,9 @@ struct Session:
                 current_data = None
                 current_json = None
 
-            # Issue the next request (no params on redirects).
+            # Issue the next request (no params on redirects; redirects never stream).
             var none_params: Optional[Dict[String, String]] = None
-            resp = self._do_request(redirect_method, current_url, none_params^, headers, current_data, current_json, timeout)
+            resp = self._do_request(redirect_method, current_url, none_params^, headers, current_data, current_json, timeout, False)
 
         raise request_exception("too many redirects (max 30)")
 
@@ -107,8 +114,13 @@ struct Session:
         data: Optional[String],
         json: Optional[String],
         timeout: Optional[Float64],
+        stream: Bool,
     ) raises -> Response:
-        """Perform a single HTTP request (no redirect following)."""
+        """Perform a single HTTP request (no redirect following).
+
+        When ``stream`` is True, the connection stays open and the Response carries a live
+        StreamingConn for lazy body reads via iter_content().
+        """
         # Resolve URL + query params.
         var u = parse_url(url)
 
@@ -153,59 +165,149 @@ struct Session:
         # Build the wire request.
         var req_str = build_request(method, u, merged, body)
 
-        # Connect, send, receive. Branch on scheme: https wraps the TCP socket in TLS.
-        # DNS was already resolved above (before header allocations) to avoid a heap-state bug.
-        var sock = TCPSocket()
-        var raw = List[UInt8]()
-        var had_error = False
-        var err_msg = String()
-
-        if scheme == "https":
-            # HTTPS: TCP connect, then TLS handshake, then send/recv over the encrypted channel.
-            var tls = TLSConnection()
-            try:
-                sock.connect_ip(ip, port, timeout)
-                tls.connect(sock.fd_value(), host)
-                tls.send_all(req_str)
-                raw = tls.recv_all()
-                tls.close()
-                sock.close()
-            except e:
-                tls.close()
-                sock.close()
-                had_error = True
-                err_msg = String(e)
-        else:
-            # HTTP: raw TCP send/recv.
-            try:
-                sock.connect_ip(ip, port, timeout)
-                sock.send_all(req_str)
-                raw = sock.recv_all()
-                sock.close()
-            except e:
-                sock.close()
-                had_error = True
-                err_msg = String(e)
-
-        if had_error:
-            raise request_exception(err_msg)
-
-        if len(raw) == 0:
-            raise request_exception("empty response from server")
-
-        var parsed = parse_response(raw)
-
-        # Compute the final URL before building the response.
+        # Compute the final URL.
         var final_url = u.origin() + u.path
         if u.query.byte_length() > 0:
             final_url = final_url + "?" + u.query
 
-        var resp = _build_response(parsed^, final_url)
+        # Connect, send. Branch on scheme: https wraps the TCP socket in TLS.
+        var sock = TCPSocket()
+        var tls = TLSConnection()
+        var is_https = (scheme == "https")
+        var connect_err = String()
+        var connected = False
+        try:
+            sock.connect_ip(ip, port, timeout)
+            if is_https:
+                tls.connect(sock.fd_value(), host)
+            connected = True
+        except e:
+            connect_err = String(e)
+        if not connected:
+            tls.close()
+            sock.close()
+            raise request_exception(connect_err)
 
+        # Send the request.
+        var send_err = String()
+        var sent_ok = False
+        try:
+            if is_https:
+                tls.send_all(req_str)
+            else:
+                sock.send_all(req_str)
+            sent_ok = True
+        except e:
+            send_err = String(e)
+        if not sent_ok:
+            tls.close()
+            sock.close()
+            raise request_exception(send_err)
+
+        if stream:
+            # Streaming: read headers incrementally, keep the connection alive in the Response.
+            return self._stream_response(sock^, tls^, is_https, host, final_url)
+
+        # Non-streaming: read the full response, then close.
+        var raw = List[UInt8]()
+        var recv_err = String()
+        var recv_ok = False
+        try:
+            if is_https:
+                raw = tls.recv_all()
+            else:
+                raw = sock.recv_all()
+            recv_ok = True
+        except e:
+            recv_err = String(e)
+        tls.close()
+        sock.close()
+        if not recv_ok:
+            raise request_exception(recv_err)
+        if len(raw) == 0:
+            raise request_exception("empty response from server")
+
+        var parsed = parse_response(raw)
+        var resp = _build_response(parsed^, final_url)
         # Extract Set-Cookie headers into the session jar.
         self.cookies.extract_from_headers(resp.headers, host)
-
         return resp^
+
+    def _stream_response(
+        mut self,
+        var sock: TCPSocket,
+        var tls: TLSConnection,
+        is_https: Bool,
+        host: String,
+        final_url: String,
+    ) raises -> Response:
+        """Read response headers incrementally, then return a streaming Response.
+
+        The socket+TLS connection ownership transfers into the StreamingConn (closed when the
+        Response is dropped).
+        """
+        # Read bytes until we find the \r\n\r\n header terminator, plus any leftover body bytes.
+        var header_buf = List[UInt8]()
+        var term_found = False
+        var tmp = alloc[UInt8](8192)
+        while not term_found:
+            var n = (
+                tls._ssl_read_raw(tmp, 8192) if is_https else sock._recv_raw(tmp, 8192)
+            )
+            if n > c_int(0):
+                var count = Int(n)
+                for i in range(count):
+                    header_buf.append(tmp[i])
+                # Check for \r\n\r\n in the buffer.
+                if _contains_term(header_buf):
+                    term_found = True
+            else:
+                break
+        tmp.free()
+
+        if not term_found:
+            tls.close()
+            sock.close()
+            raise request_exception("streaming: incomplete response headers")
+
+        # Split header bytes from leftover body bytes at the terminator.
+        var sep = _find_in_list(header_buf, _crlf_crlf())
+        var head_str = _list_slice_to_string(header_buf, 0, sep)
+        var body_start = sep + 4
+        var leftover = List[UInt8]()
+        for i in range(body_start, len(header_buf)):
+            leftover.append(header_buf[i])
+
+        var ph = parse_headers(head_str)
+        var status_code = ph.status_code
+        var reason = ph.reason
+        # Read framing values, then copy headers (Dict can't be moved out of a struct field).
+        var te = ph.headers.get("transfer-encoding", String(""))
+        var cl_str = ph.headers.get("content-length", String(""))
+        var chunked = (_to_lower(te) == "chunked")
+        var cl = _parse_content_length(cl_str)
+        var hdrs = Headers()
+        for entry in ph.headers.items():
+            hdrs._data[entry.key] = entry.value
+
+        # Extract Set-Cookie from the headers we already have.
+        self.cookies.extract_from_headers(hdrs, host)
+
+        # Build the StreamingConn. It takes ownership of the socket fd + TLS handle.
+        var fd = sock.fd_value()
+        var ssl_ptr = tls._steal_ssl()  # transfer SSL* out of TLSConnection (prevents its close)
+        var libssl_handle = tls._steal_libssl()  # transfer the libssl handle
+        # Mark sock/tls as no longer owning the connection so their destructors don't double-close.
+        sock._disown()
+        tls._disown()
+
+        var content_length = -1
+        if cl != None:
+            content_length = cl.value()
+        var conn = StreamingConn(fd, libssl_handle^, ssl_ptr^, leftover^, content_length, chunked)
+        var conn_ptr = OwnedPointer[StreamingConn](conn^)
+
+        return Response(status_code, reason, hdrs^, List[UInt8](), final_url, conn_ptr^)
 
     # --- Convenience method shortcuts ---
 
@@ -214,8 +316,9 @@ struct Session:
         headers: Optional[Dict[String, String]] = None,
         timeout: Optional[Float64] = None,
         allow_redirects: Bool = True,
+        stream: Bool = False,
     ) raises -> Response:
-        return self.request("GET", url, params=params^, headers=headers, timeout=timeout, allow_redirects=allow_redirects)
+        return self.request("GET", url, params=params^, headers=headers, timeout=timeout, allow_redirects=allow_redirects, stream=stream)
 
     def post(
         mut self, url: String, data: Optional[String] = None, json: Optional[String] = None,
@@ -374,3 +477,59 @@ def _find(haystack: String, needle: String) -> Int:
         if matched:
             return i
     return -1
+
+
+# --- streaming helpers ---
+
+
+def _contains_term(buf: List[UInt8]) -> Bool:
+    """True if the buffer contains the \\r\\n\\r\\n header terminator."""
+    return _find_in_list(buf, _crlf_crlf()) >= 0
+
+
+def _crlf_crlf() -> List[UInt8]:
+    """The byte sequence \\r\\n\\r\\n (HTTP header terminator)."""
+    var n: List[UInt8] = [0x0D, 0x0A, 0x0D, 0x0A]
+    return n^
+
+
+def _find_in_list(buf: List[UInt8], needle: List[UInt8]) -> Int:
+    """Return the byte index of the first occurrence of ``needle`` in ``buf``, or -1."""
+    var bl = len(buf)
+    var nl = len(needle)
+    if nl == 0 or bl < nl:
+        return -1
+    var last = bl - nl
+    for i in range(last + 1):
+        var matched = True
+        for j in range(nl):
+            if buf[i + j] != needle[j]:
+                matched = False
+                break
+        if matched:
+            return i
+    return -1
+
+
+def _list_slice_to_string(buf: List[UInt8], start: Int, end: Int) -> String:
+    """Convert a slice of a byte list to a String (lossy UTF-8)."""
+    var slice = List[UInt8]()
+    for i in range(start, end):
+        slice.append(buf[i])
+    var span = Span[UInt8](ptr=slice.unsafe_ptr(), length=len(slice))
+    return String(from_utf8_lossy=span)
+
+
+def _parse_content_length(s: String) -> Optional[Int]:
+    """Parse a Content-Length value (digits) to Int, or None."""
+    if s.byte_length() == 0:
+        return None
+    var sp = s.unsafe_ptr()
+    var n = s.byte_length()
+    var v = 0
+    for i in range(n):
+        var b = sp[i]
+        if b < 0x30 or b > 0x39:
+            return None
+        v = v * 10 + Int(b - 0x30)
+    return v

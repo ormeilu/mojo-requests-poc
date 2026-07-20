@@ -15,10 +15,11 @@ def request(
     json: Optional[String] = None,
     timeout: Optional[Float64] = None,
     allow_redirects: Bool = True,
+    stream: Bool = False,
 ) raises -> Response:
     """Send an HTTP request and return a Response."""
     var s = Session()
-    return s.request(method, url, params=params^, headers=headers, data=data, json=json, timeout=timeout, allow_redirects=allow_redirects)
+    return s.request(method, url, params=params^, headers=headers, data=data, json=json, timeout=timeout, allow_redirects=allow_redirects, stream=stream)
 
 
 def get(
@@ -27,10 +28,11 @@ def get(
     headers: Optional[Dict[String, String]] = None,
     timeout: Optional[Float64] = None,
     allow_redirects: Bool = True,
+    stream: Bool = False,
 ) raises -> Response:
     """Send an HTTP GET request."""
     var s = Session()
-    return s.get(url, params=params^, headers=headers, timeout=timeout, allow_redirects=allow_redirects)
+    return s.get(url, params=params^, headers=headers, timeout=timeout, allow_redirects=allow_redirects, stream=stream)
 
 
 def post(

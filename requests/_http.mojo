@@ -17,8 +17,8 @@ comptime HEADER_TERMINATOR = "\r\n\r\n"
 
 def build_request(
     method: String,
-    read url: URL,
-    read headers: Dict[String, String],
+    imm url: URL,
+    imm headers: Dict[String, String],
     body: String,
 ) -> String:
     """Assemble the HTTP/1.1 request wire format.
@@ -53,6 +53,60 @@ def _has_key_ci(d: Dict[String, String], key: String) -> Bool:
 
 
 # --- Response parsing ------------------------------------------------------
+
+
+@fieldwise_init
+struct ParsedHeaders:
+    """Just the status line + headers (no body). Returned by parse_headers()."""
+    var status_code: Int
+    var reason: String
+    var headers: Dict[String, String]
+
+
+def parse_headers(head: String) raises -> ParsedHeaders:
+    """Parse the header block (status line + headers, no body) into a ParsedHeaders.
+
+    ``head`` is the bytes up to (but not including) the terminating ``\\r\\n\\r\\n``.
+    """
+    var lines = head.split(CRLF)
+    if len(lines) == 0:
+        raise request_exception("malformed response: empty header block")
+
+    # Status line: "HTTP/1.1 200 OK"
+    var status_line = String(lines[0])
+    var status_parts = status_line.split(" ")
+    if len(status_parts) < 2:
+        raise request_exception(String(t"malformed status line: {status_line}"))
+    var code = _parse_int_local(String(status_parts[1]))
+    if code == None:
+        raise request_exception(String(t"malformed status code: {status_parts[1]}"))
+
+    var reason = String()
+    var sp_pos = _find(status_line, " ")
+    if sp_pos >= 0:
+        var after_ver = String(status_line[byte=sp_pos + 1 :])
+        var sp2 = _find(after_ver, " ")
+        if sp2 >= 0:
+            reason = String(after_ver[byte=sp2 + 1 :])
+
+    var headers: Dict[String, String] = {}
+    var i = 1
+    while i < len(lines):
+        var line = String(lines[i])
+        if line.byte_length() == 0:
+            i += 1
+            continue
+        var colon = _find(line, ":")
+        if colon < 0:
+            i += 1
+            continue
+        var name = _to_lower(String(line[byte=0:colon]))
+        var value = String(line[byte=colon + 1 :])
+        value = _strip(value)
+        headers[name] = value
+        i += 1
+
+    return ParsedHeaders(code.value(), reason, headers^)
 
 
 @fieldwise_init
@@ -95,58 +149,35 @@ def parse_response(raw: List[UInt8]) raises -> ParsedResponse:
     var head = String(raw_str[byte=0:sep])
     var body_start = sep + 4  # len("\r\n\r\n")
 
-    var lines = head.split(CRLF)
-    if len(lines) == 0:
-        raise request_exception("malformed response: empty header block")
+    var ph = parse_headers(head)
+    return _build_parsed(ph^, raw, body_start)
 
-    # Status line: "HTTP/1.1 200 OK"
-    var status_line = String(lines[0])
-    var status_parts = status_line.split(" ")
-    if len(status_parts) < 2:
-        raise request_exception(String(t"malformed status line: {status_line}"))
-    var code = _parse_int_local(String(status_parts[1]))
-    if code == None:
-        raise request_exception(String(t"malformed status code: {status_parts[1]}"))
 
-    var reason = String()
-    # The reason phrase is everything after "HTTP/1.1 N " — rejoin the rest if present.
-    var sp_pos = _find(status_line, " ")
-    if sp_pos >= 0:
-        var after_ver = String(status_line[byte=sp_pos + 1 :])
-        var sp2 = _find(after_ver, " ")
-        if sp2 >= 0:
-            reason = String(after_ver[byte=sp2 + 1 :])
+def _build_parsed(var ph: ParsedHeaders, raw: List[UInt8], body_start: Int) raises -> ParsedResponse:
+    """Build a ParsedResponse from owned headers.
 
-    # Headers
-    var headers: Dict[String, String] = {}
-    var i = 1
-    while i < len(lines):
-        var line = String(lines[i])
-        if line.byte_length() == 0:
-            i += 1
-            continue
-        var colon = _find(line, ":")
-        if colon < 0:
-            i += 1
-            continue
-        var name = _to_lower(String(line[byte=0:colon]))
-        var value = String(line[byte=colon + 1 :])
-        value = _strip(value)
-        headers[name] = value
-        i += 1
-
-    # Body framing
-    var body = _extract_body(raw, body_start, headers)
-
-    return ParsedResponse(code.value(), reason, headers^, body^)
+    Copies header entries into a fresh Dict (Dict is non-copyable and can't be moved out of a struct
+    field while other fields are read, so we rebuild it).
+    """
+    var status_code = ph.status_code
+    var reason = ph.reason
+    # Read framing info as values, then copy headers into a fresh dict.
+    var te = ph.headers.get("transfer-encoding", String(""))
+    var cl_str = ph.headers.get("content-length", String(""))
+    var chunked = (_to_lower(te) == "chunked")
+    var cl = _parse_int_local(cl_str)
+    var headers_copy: Dict[String, String] = {}
+    for entry in ph.headers.items():
+        headers_copy[entry.key] = entry.value
+    var body = _extract_body(raw, body_start, chunked, cl)
+    return ParsedResponse(status_code, reason, headers_copy^, body^)
 
 
 def _extract_body(
-    raw: List[UInt8], body_start: Int, headers: Dict[String, String]
+    raw: List[UInt8], body_start: Int, chunked: Bool, content_length: Optional[Int]
 ) raises -> List[UInt8]:
-    """Extract the response body using Content-Length or chunked decoding; fall back to bytes after the header block."""
-    var te = headers.get("transfer-encoding", String(""))
-    if _to_lower(te) == "chunked":
+    """Extract the response body. ``chunked`` and ``content_length`` are pre-parsed framing values."""
+    if chunked:
         return _dechunk(raw, body_start)
 
     var body = List[UInt8]()
@@ -154,10 +185,8 @@ def _extract_body(
     if body_start >= total:
         return body^
 
-    var cl_str = headers.get("content-length", String(""))
-    var cl = _parse_int_local(cl_str)
-    if cl != None:
-        var take = cl.value()
+    if content_length != None:
+        var take = content_length.value()
         if body_start + take > total:
             take = total - body_start  # don't overrun
         for k in range(take):

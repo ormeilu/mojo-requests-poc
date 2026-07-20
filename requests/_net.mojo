@@ -172,6 +172,15 @@ struct TCPSocket:
         if not self.closed:
             self._raw_close()
 
+    def _recv_raw(mut self, buf: UnsafePointer[UInt8, MutUntrackedOrigin], max_bytes: Int) raises -> c_int:
+        """Single recv() call. Returns byte count, or <=0 on close/error."""
+        return external_call["recv", c_int](self.fd, buf, c_int(max_bytes), RECV_FLAGS)
+
+    def _disown(mut self):
+        """Mark this socket as not owning its fd (so __del__/close won't close it). Used for streaming."""
+        self.closed = True
+        self.fd = c_int(-1)
+
     def _raw_close(mut self):
         if self.fd >= c_int(0):
             _ = external_call["close", c_int](self.fd)

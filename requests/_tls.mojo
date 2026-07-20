@@ -141,6 +141,29 @@ struct TLSConnection:
                 _ = self._libssl.value()[].call["SSL_CTX_free", c_int](self._ctx.value())
                 self._ctx = None
 
+    def _ssl_read_raw(mut self, buf: UnsafePointer[UInt8, MutUntrackedOrigin], max_bytes: Int) raises -> c_int:
+        """Single SSL_read call. Returns byte count, or <=0 on close/error."""
+        return self._libssl.value()[].call["SSL_read", c_int](self._ssl.value(), buf, c_int(max_bytes))
+
+    def _steal_ssl(mut self) -> Optional[UnsafePointer[UInt8, MutUntrackedOrigin]]:
+        """Transfer ownership of the SSL* pointer out (so close() won't free it). Used for streaming."""
+        var s = self._ssl
+        self._ssl = None
+        return s
+
+    def _steal_libssl(mut self) -> Optional[OwnedPointer[OwnedDLHandle]]:
+        """Transfer ownership of the libssl handle out (so close() won't drop it). Used for streaming."""
+        var h = self._libssl^
+        self._libssl = None
+        return h^
+
+    def _disown(mut self):
+        """Mark this connection as no longer owning its resources (prevents double-close). Used for streaming."""
+        self._closed = True
+        self._ssl = None
+        self._ctx = None
+        self._libssl = None
+
 
 comptime CHUNK_SIZE = 8192
 

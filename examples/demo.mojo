@@ -50,4 +50,16 @@ def main() raises:
     print("    body bytes:", r4.text().byte_length())
     print()
 
+    # 6. Streaming — iter_content() pulls the body in chunks (no full buffering)
+    print("[6] Streaming GET (stream=True)")
+    var r5 = requests.get("https://example.com/", stream=True)
+    print("    status:", r5.status_code, "| streaming:", r5.is_streaming())
+    var total = 0
+    var chunk_count = 0
+    for chunk in r5.iter_content(64):
+        chunk_count += 1
+        total += len(chunk)
+    print("    chunks received:", chunk_count, "| total body bytes:", total)
+    print()
+
     print("=== demo complete ===")

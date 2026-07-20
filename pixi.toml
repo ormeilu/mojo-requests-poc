@@ -6,17 +6,21 @@ platforms = ["osx-arm64"]
 version = "0.1.0"
 
 [tasks]
-# Run the test suite (16 tests covering URL parsing, HTTP framing, JSON, encoding)
+# Run the core test suite (URL parsing, HTTP framing, JSON, encoding)
 test = "mojo -I . tests/test_requests.mojo"
 # Run the HTTPS-specific test suite
 test-https = "mojo -I . tests/test_https.mojo"
+# Run the streaming test suite (stream=True, iter_content — includes live HTTP/HTTPS tests)
+test-streaming = "mojo -I . tests/test_streaming.mojo"
+# Run all unit + live tests
+test-all = "mojo -I . tests/test_requests.mojo && mojo -I . tests/test_https.mojo && mojo -I . tests/test_streaming.mojo"
 # Run the demo (optionally start a local server first: python3 -m http.server 18090)
 demo = "mojo -I . examples/demo.mojo"
 # Run benchmarks: python requests vs httpx vs mojo-requests (hyperfine)
 bench = "bash benchmark/run.sh"
 
 [dependencies]
-mojo = ">=1.0.0b3.dev2026071306,<2"
+mojo = ">=1.0.0b3.dev2026071921,<2"
 python = ">=3.14.6,<3.15"
 requests = ">=2.34.2,<3"
 httpx = ">=0.28.1,<0.29"
