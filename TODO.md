@@ -27,4 +27,4 @@ from scratch via libc FFI.
 - [x] **Streaming responses** — `stream=True` keeps the connection open; `iter_content(chunk_size)` pulls body bytes on demand. Supports HTTP and HTTPS (TLS handle transfers into a `StreamingConn`). `text()`/`iter_content()` auto-drain. Redirects skipped when streaming (matches Python's stream+allow_redirects caveat). Chunked transfer-encoding streams until close (incremental dechunking is future work).
 - [ ] **Connection pooling / keep-alive** — reuse TCP connections across requests in a Session.
 - [ ] **Proxy support** — `proxies` parameter (HTTP/HTTPS proxy tunneling).
-- [ ] **Pure-Mojo TLS** — replace OpenSSL FFI with a Mojo-native TLS 1.3 implementation.
+- ~~**Pure-Mojo TLS** — replace OpenSSL FFI with a Mojo-native TLS 1.3 implementation.~~ **Won't do:** too massive and risky an undertaking (full TLS 1.3 state machine, AEAD, X.509 path validation, constant-time crypto). OpenSSL via FFI is battle-tested, auto-discovered at runtime, and good enough — re-implementing it in Mojo would dwarf the rest of the library for no real-world gain.

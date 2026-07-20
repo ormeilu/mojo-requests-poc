@@ -1,0 +1,69 @@
+# Continuous integration for mojo-requests.
+#
+# Two jobs, both running on a matrix of macOS (osx-arm64) and Linux (linux-64) to match the
+# platforms declared in pixi.toml:
+#   - lint:   `mojo format` check — fails if any source diverges from canonical formatting.
+#   - test:   installs OpenSSL on Linux, runs all three test suites (HTTP, HTTPS, streaming).
+#
+# The streaming + HTTPS suites hit the network (example.com); GitHub-hosted runners have
+# outbound internet, so those run as part of the standard test step.
+
+name: CI
+
+on:
+  push:
+    branches: [master]
+  pull_request:
+    branches: [master]
+
+# Cancel in-flight runs for the same ref when a new commit is pushed.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  lint:
+    name: Lint (mojo format)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install pixi
+        uses: prefix-dev/setup-pixi@v0.8.1
+        with:
+          manifest-path: pixi.toml
+
+      - name: Format check
+        run: pixi run -e default fmt-check
+
+  test:
+    name: Test (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: macos-latest
+            pixi-platform: osx-arm64
+          - os: ubuntu-latest
+            pixi-platform: linux-64
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install system OpenSSL (Linux only)
+        if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y libssl-dev
+
+      - name: Install pixi
+        uses: prefix-dev/setup-pixi@v0.8.1
+        with:
+          manifest-path: pixi.toml
+
+      - name: Core tests (URL parsing, framing, JSON)
+        run: pixi run test
+
+      - name: HTTPS tests
+        run: pixi run test-https
+
+      - name: Streaming tests (live network)
+        run: pixi run test-streaming

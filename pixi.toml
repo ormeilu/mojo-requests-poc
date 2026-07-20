@@ -2,7 +2,7 @@
 authors = ["Ilya Lubenets <lubenets.ilya.igorevich@gmail.com>"]
 channels = ["https://conda.modular.com/max-nightly", "conda-forge"]
 name = "mojo-requests"
-platforms = ["osx-arm64"]
+platforms = ["osx-arm64", "linux-64"]
 version = "0.1.0"
 
 [tasks]
@@ -18,6 +18,8 @@ test-all = "mojo -I . tests/test_requests.mojo && mojo -I . tests/test_https.moj
 demo = "mojo -I . examples/demo.mojo"
 # Run benchmarks: python requests vs httpx vs mojo-requests (hyperfine)
 bench = "bash benchmark/run.sh"
+# Format-check: fails if any Mojo source diverges from `mojo format`. Used by CI.
+fmt-check = "mojo format --quiet requests/ tests/ examples/ && git diff --exit-code --name-only requests/ tests/ examples/"
 
 [dependencies]
 mojo = ">=1.0.0b3.dev2026071921,<2"

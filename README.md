@@ -16,9 +16,12 @@ percent-encoding, and a JSON parser — is written in Mojo.
 # Clone, then enter the environment
 pixi shell
 
-# Run the test suite (24 tests: 16 HTTP + 8 HTTPS)
-pixi run test
-pixi run mojo -I . tests/test_https.mojo   # HTTPS-specific tests
+# Run the test suite (30 tests: 16 HTTP + 8 HTTPS + 6 streaming)
+pixi run test                # core HTTP / URL / JSON tests
+pixi run test-https          # HTTPS-specific tests
+pixi run test-streaming      # stream=True + iter_content (live network)
+# …or run them all:
+pixi run test-all
 
 # Run the demo (starts a local HTTP server for you to hit)
 pixi run demo
@@ -56,6 +59,15 @@ var r4 = s.get("http://example.com/protected")
 # HTTPS (TLS via OpenSSL — certificate verification enabled by default)
 var r5 = requests.get("https://example.com/", timeout=15.0)
 print(r5.status_code)       # 200
+
+# Streaming: keep the connection open, read the body in chunks (no full buffering)
+var r6 = requests.get("https://example.com/large.bin", stream=True)
+print(r6.is_streaming())    # True
+var total = 0
+for chunk in r6.iter_content(8192):
+    total += len(chunk)
+print("downloaded bytes:", total)
+# text() also works — it auto-drains the stream first.
 
 # Error handling
 var err = s.get("http://example.com/missing")
@@ -100,10 +112,12 @@ s.post(url, json=..., ...)
 | `headers`            | Case-insensitive `Headers` (e.g. `headers["Content-Type"]`, `headers.get(key, default)`) |
 | `content`            | Raw body bytes (`List[UInt8]`) |
 | `url`                | Final URL (`String`) |
-| `text()`             | Body decoded to `String` (lossy UTF-8) |
-| `json()`             | Body parsed as `JSONValue` |
+| `text()`             | Body decoded to `String` (lossy UTF-8). Drains the stream if `stream=True`. |
+| `json()`             | Body parsed as `JSONValue`. Drains the stream if `stream=True`. |
 | `ok()`               | `True` if `status_code < 400` |
 | `raise_for_status()` | raises `HTTPError` on 4xx/5xx |
+| `is_streaming()`     | `True` if this Response was created with `stream=True` and the body hasn't been read yet |
+| `iter_content(n)`    | For `stream=True`: returns `List[List[UInt8]]` of up-to-`n`-byte chunks (drains the stream) |
 
 ### `JSONValue`
 
@@ -207,10 +221,25 @@ Full results are exported to `benchmark/results.md` on each run.
 ## Limitations & roadmap
 
 - **IPv4 only** (the `sockaddr_in` path). IPv6 support would add a `sockaddr_in6` path.
-- **No redirects.** `allow_redirects` is not yet implemented (responses are returned as-is).
-- **No cookie jar persistence.** Sessions carry default headers but don't persist `Set-Cookie`.
-- **No streaming.** The full response is read into memory (`recv` until close).
-- **TLS requires OpenSSL** to be installed (the library auto-discovers it; raises `SSLError` if not found).
+- **No connection pooling / keep-alive.** Each request opens a fresh TCP+TLS connection (the
+  server is asked to close after responding). Reuse across requests is future work.
+- **No proxy support** (`proxies` parameter).
+- **Streaming + redirects don't combine.** When `stream=True`, redirects are not followed
+  (matches Python requests' caveat). Streaming a chunked-encoded body reads until close;
+  incremental dechunking is future work.
+- **TLS requires OpenSSL** to be installed (the library auto-discovers it; raises `SSLError` if
+  not found). A pure-Mojo TLS implementation is explicitly out of scope — see `TODO.md`.
+
+### Implemented
+
+- [x] HTTP/1.1 GET/POST/PUT/PATCH/DELETE/HEAD/OPTIONS over TCP (libc FFI, no Python, no libcurl)
+- [x] HTTPS/TLS via OpenSSL (auto-discovered, `dlopen`'d at runtime, cert verification on)
+- [x] URL parsing + percent-encoding + query-string building
+- [x] Response framing: `Content-Length` and `Transfer-Encoding: chunked`
+- [x] JSON request bodies + JSON response parsing (pure-Mojo parser)
+- [x] Redirect following (`allow_redirects`, 3xx, supports absolute/protocol-relative/root-relative/relative)
+- [x] Cookie jar persistence across requests in a `Session`
+- [x] Streaming responses (`stream=True` + `iter_content(chunk_size)`)
 
 ## License
 
