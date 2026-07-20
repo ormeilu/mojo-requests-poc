@@ -243,4 +243,4 @@ Full results are exported to `benchmark/results.md` on each run.
 
 ## License
 
-MIT.
+Apache License 2.0. See [LICENSE](LICENSE).
