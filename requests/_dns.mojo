@@ -73,10 +73,11 @@ def resolve(host: String) raises -> UInt32:
 def _resolve_by_name(host: String) raises -> UInt32:
     """Resolve a hostname via libc ``getaddrinfo`` (thread-safe, heap-allocated — unlike gethostbyname).
 
-    Retries up to 3 times with a short sleep: the first ``getaddrinfo`` in a fresh process can
-    fail transiently on some systems (lazy resolver init / heap-state-dependent behavior observed
-    in Mojo 1.0 beta). The caller's Session also warms up with a localhost resolve, but network
-    resolvers can still hiccup on first contact with a real hostname.
+    Retries up to 5 times with exponential backoff (50ms, 100ms, 200ms, 400ms): the first
+    ``getaddrinfo`` in a fresh process can fail transiently on some systems (lazy resolver init /
+    heap-state-dependent behavior observed in Mojo 1.0 beta). The caller's Session also warms up
+    with a localhost resolve, but network resolvers can still hiccup on first contact with a real
+    hostname.
     """
     var hints = alloc[AddrInfo](1)
     hints[].ai_flags = 0
@@ -92,7 +93,7 @@ def _resolve_by_name(host: String) raises -> UInt32:
 
     var rc = c_int(-1)
     var attempt = 0
-    while attempt < 3:
+    while attempt < 5:
         rc = external_call["getaddrinfo", c_int](
             host.unsafe_ptr(),
             c_int(
@@ -103,10 +104,10 @@ def _resolve_by_name(host: String) raises -> UInt32:
         )
         if rc == c_int(0):
             break
-        # Brief backoff: 5ms, 25ms. nanosleep via libc {sec=0, nsec=N}.
+        # Exponential backoff: 50ms, 100ms, 200ms, 400ms. nanosleep via libc {sec=0, nsec=N}.
         var req = alloc[Timespec](1)
         req[].tv_sec = 0
-        req[].tv_nsec = Int64(5_000_000 * (attempt + 1))
+        req[].tv_nsec = Int64(50_000_000 * (1 << attempt))
         _ = external_call["nanosleep", c_int](req, 0)
         req.free()
         attempt += 1
