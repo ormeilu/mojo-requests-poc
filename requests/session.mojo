@@ -8,7 +8,7 @@ from ._url import parse_url, build_query_string, url_encode
 from ._http import build_request, parse_response, parse_headers, ParsedResponse
 from ._net import TCPSocket
 from ._dns import resolve as _dns_resolve
-from ._tls import TLSConnection
+from ._tls import TLSConnection, TLSSessionCache
 from ._cookies import CookieJar
 from ._streaming import StreamingConn
 from ._pool import KeptAliveConn
@@ -47,6 +47,7 @@ struct Session(Movable):
     var ca_bundle: Optional[String]
     var proxies: Dict[String, String]
     var _pool: List[KeptAliveConn]
+    var _tls_sessions: TLSSessionCache
 
     def __init__(out self):
         self.headers = {}
@@ -61,6 +62,7 @@ struct Session(Movable):
         # or overridden per-call via the request() proxies parameter.
         self.proxies = {}
         self._pool = []
+        self._tls_sessions = TLSSessionCache()
         # Warm up the DNS resolver: the first getaddrinfo call in a process can fail on some
         # systems (lazy resolver init). Doing a throwaway resolve here primes it for real use.
         try:
@@ -79,6 +81,7 @@ struct Session(Movable):
         self.ca_bundle = existing.ca_bundle^
         self.proxies = existing.proxies^
         self._pool = existing._pool^
+        self._tls_sessions = existing._tls_sessions^
 
     def __del__(deinit self):
         """Close every pooled connection when the Session is dropped (no fd/SSL leaks).
@@ -467,13 +470,22 @@ struct Session(Movable):
         var sock = TCPSocket()
         var tls = TLSConnection()
         if is_https:
+            var session_key = String(t"{host}:{port}")
+            var cached_session = self._tls_sessions.get(session_key)
             try:
                 sock.connect_ip(ip, port, timeout)
-                tls.connect(sock.fd_value(), host, verify, ca_bundle)
+                tls.connect(
+                    sock.fd_value(), host, verify, ca_bundle, cached_session
+                )
             except e:
                 tls.close()
                 sock.close()
                 raise e^
+            # Stash the (possibly new, possibly resumed) session for next time before
+            # stealing the SSL* out from under the wrapper.
+            var new_session = tls.get_session()
+            if new_session != None:
+                self._tls_sessions.put(session_key, new_session.value())
             var fd = sock.fd_value()
             var ssl_ptr = tls._steal_ssl()
             var handle = tls._steal_libssl()

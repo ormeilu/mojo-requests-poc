@@ -21,6 +21,8 @@ comptime SSL_ERROR_SSL: c_int = 1
 comptime SSL_ERROR_SYSCALL: c_int = 5
 comptime TLS1_2_VERSION: c_int = 0x0303
 comptime SSL_CTRL_SET_MIN_PROTO_VERSION: c_int = 123
+comptime SSL_SESS_CACHE_CLIENT: c_int = 1
+comptime SSL_CTRL_SET_SESS_CACHE_MODE: c_int = 44
 comptime TLS13_CIPHERSUITES: StaticString = (
     "TLS_AES_128_GCM_SHA256:TLS_AES_256_GCM_SHA384:TLS_CHACHA20_POLY1305_SHA256"
 )
@@ -60,6 +62,7 @@ struct TLSConnection:
         hostname: String,
         verify: Bool = True,
         ca_bundle: Optional[String] = None,
+        session: Optional[UnsafePointer[UInt8, MutUntrackedOrigin]] = None,
     ) raises SSLError:
         """Perform the TLS handshake over an already-connected socket.
 
@@ -71,6 +74,10 @@ struct TLSConnection:
           overrides the system trust store. When None, the trust store is resolved in this
           priority order: explicit ca_bundle > $REQUESTS_CA_BUNDLE env var > $SSL_CERT_FILE
           env var > OpenSSL system defaults (``SSL_CTX_set_default_verify_paths``).
+        - ``session``: an ``SSL_SESSION*`` from a prior handshake to the same host (see
+          ``TLSSessionCache``). When set, offered via ``SSL_set_session`` so the server can
+          resume instead of doing a full asymmetric handshake. Best-effort — a session the
+          server has expired/rejected just falls back to a full handshake.
 
         Raises ``SSLError`` on any failure (missing libssl, handshake failure, cert rejection).
         """
@@ -112,6 +119,16 @@ struct TLSConnection:
         )
         _ = self._libssl.value()[].call["SSL_CTX_set_cipher_list", c_int](
             ctx, TLS12_CIPHER_LIST.unsafe_ptr()
+        )
+
+        # Session resumption: enable the client-side session cache mode so OpenSSL keeps
+        # session tickets around for SSL_get1_session() to retrieve after the handshake. The
+        # actual cache (host -> SSL_SESSION*) is owned by the caller (TLSSessionCache); this
+        # only tells OpenSSL to participate. SSL_CTX_set_session_cache_mode is a macro (like
+        # SSL_set_tlsext_host_name / SSL_CTX_set_min_proto_version above) -> SSL_CTX_ctrl(ctx,
+        # 44, mode, NULL) — not a real exported symbol.
+        _ = self._libssl.value()[].call["SSL_CTX_ctrl", c_int](
+            ctx, SSL_CTRL_SET_SESS_CACHE_MODE, SSL_SESS_CACHE_CLIENT, c_int(0)
         )
 
         if verify:
@@ -225,6 +242,12 @@ struct TLSConnection:
                 hostname=hostname,
             )
 
+        # Offer a cached session for resumption, if the caller has one for this host.
+        if session != None:
+            _ = self._libssl.value()[].call["SSL_set_session", c_int](
+                ssl, session.value()
+            )
+
         # Perform the handshake.
         var connect_rc = self._libssl.value()[].call["SSL_connect", c_int](ssl)
         if connect_rc != c_int(1):
@@ -235,6 +258,22 @@ struct TLSConnection:
             )
 
         self._closed = False
+
+    def get_session(
+        mut self,
+    ) -> Optional[UnsafePointer[UInt8, MutUntrackedOrigin]]:
+        """Return the negotiated ``SSL_SESSION*`` (owning reference, via ``SSL_get1_session``)
+        for the caller to stash in a ``TLSSessionCache``, or None if unavailable. The caller
+        becomes responsible for eventually ``SSL_SESSION_free``-ing it (``TLSSessionCache``
+        does this)."""
+        if self._ssl == None or self._libssl == None:
+            return None
+        var s = self._libssl.value()[].call[
+            "SSL_get1_session", UnsafePointer[UInt8, MutUntrackedOrigin]
+        ](self._ssl.value())
+        if Int(s) == 0:
+            return None
+        return s
 
     def send_all(mut self, data: String) raises SSLError:
         """Send the full request string over TLS, looping over partial SSL_write calls.
@@ -318,6 +357,66 @@ struct TLSConnection:
         self._ssl = None
         self._ctx = None
         self._libssl = None
+
+
+struct TLSSessionCache(Movable):
+    """Per-Session cache of negotiated ``SSL_SESSION*`` handles, keyed by ``"host:port"``.
+
+    Lets a re-connect to a host we've already handshaked with (a fresh endpoint, or a stale
+    pooled connection being replaced) skip the asymmetric key exchange via TLS session
+    resumption. Owns a lazily-loaded libssl handle solely to call ``SSL_SESSION_free`` on
+    eviction/drop — any dlopen'd handle to the same shared library works, since the process
+    only ever has one loaded copy.
+    """
+
+    var _libssl: Optional[OwnedPointer[OwnedDLHandle]]
+    var _sessions: Dict[String, UnsafePointer[UInt8, MutUntrackedOrigin]]
+
+    def __init__(out self):
+        self._libssl = None
+        self._sessions = {}
+
+    def __del__(deinit self):
+        self.clear()
+
+    def __moveinit__(out self, deinit existing: Self):
+        self._libssl = existing._libssl^
+        self._sessions = existing._sessions^
+
+    def clear(mut self):
+        """Free every cached session and empty the cache. Idempotent."""
+        if self._libssl != None:
+            for entry in self._sessions.items():
+                _ = self._libssl.value()[].call["SSL_SESSION_free", c_int](
+                    entry.value
+                )
+        self._sessions = {}
+
+    def get(
+        self, key: String
+    ) raises -> Optional[UnsafePointer[UInt8, MutUntrackedOrigin]]:
+        if key in self._sessions:
+            return self._sessions[key]
+        return None
+
+    def put(
+        mut self,
+        key: String,
+        session: UnsafePointer[UInt8, MutUntrackedOrigin],
+    ) raises:
+        """Store ``session`` for ``key``, freeing any previous entry. Best-effort: if libssl
+        can't be loaded (should not happen — a handshake already succeeded to get here), the
+        new session is dropped rather than leaked."""
+        if self._libssl == None:
+            try:
+                self._libssl = OwnedPointer[OwnedDLHandle](_load_libssl())
+            except _:
+                return
+        if key in self._sessions:
+            _ = self._libssl.value()[].call["SSL_SESSION_free", c_int](
+                self._sessions[key]
+            )
+        self._sessions[key] = session
 
 
 comptime CHUNK_SIZE = 8192
