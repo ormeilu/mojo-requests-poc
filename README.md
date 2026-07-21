@@ -23,10 +23,11 @@ percent-encoding, and a JSON parser — is written in Mojo.
 # Clone, then enter the environment
 pixi shell
 
-# Run the test suite (33 tests: 16 HTTP + 11 HTTPS + 6 streaming)
+# Run the test suite (61 tests: 32 HTTP + 11 HTTPS + 6 streaming + 12 keep-alive)
 pixi run test                # core HTTP / URL / JSON tests
 pixi run test-https          # HTTPS-specific tests
 pixi run test-streaming      # stream=True + iter_content (live network)
+pixi run test-keepalive      # connection pooling / keep-alive
 # …or run them all:
 pixi run test-all
 
@@ -62,6 +63,15 @@ print(parsed["name"].as_string())
 var s = requests.Session()
 s.headers["Authorization"] = "Bearer xyz"
 var r4 = s.get("http://example.com/protected")
+
+# Keep-alive: a Session reuses the underlying TCP/TLS connection across requests to the
+# same endpoint automatically (amortizing the TCP + TLS handshake). Use it as a context
+# manager so idle pooled connections are closed on block exit.
+with requests.Session() as session:
+    var a = session.get("https://example.com/")
+    var b = session.get("https://example.com/about")   # reuses a's connection
+    print(a.status_code, b.status_code)
+# `session.close()` closes the pool explicitly if you don't use `with`.
 
 # HTTPS (TLS via OpenSSL — certificate verification enabled by default)
 var r5 = requests.get("https://example.com/", timeout=15.0)
@@ -111,7 +121,28 @@ var s = requests.Session()
 s.headers["key"] = "value"   # default headers applied to every request
 s.get(url, ...)
 s.post(url, json=..., ...)
+s.close()                    # close all pooled keep-alive connections
 ```
+
+A `Session` also persists cookies and TLS defaults (`verify` / `ca_bundle`) across requests, and
+**pools connections** for keep-alive: after a self-delimiting response (Content-Length or chunked,
+without `Connection: close`) the live TCP/TLS connection is kept and reused by the next request to
+the same scheme/host/port — skipping the TCP and (for HTTPS) TLS handshake. A pooled connection the
+server has since dropped is transparently retried once on a fresh socket.
+
+Use it as a **context manager** so pooled connections are closed on block exit (via `__del__`, so it
+also fires on an exception):
+
+```mojo
+with requests.Session() as s:
+    var r1 = s.get("https://example.com/")
+    var r2 = s.get("https://example.com/next")   # reuses r1's connection
+# pool closed here
+```
+
+Streaming responses (`stream=True`) are never pooled — the live connection is owned by the
+`Response` until it is dropped. Connection reuse is per-`Session`; the module-level functions
+(`requests.get`, …) create a throwaway Session and so do not pool across calls.
 
 ### `Response`
 
@@ -145,19 +176,45 @@ j.is_null()
 
 ### Exceptions
 
-Mojo's `Error` is a builtin struct (not a conformance trait), so exceptions are **constructor functions**
-that return a categorized `Error`. Classify a caught error with `exception_kind()`:
+Each error category is a typed struct conforming to `Movable` + `Writable`, carrying a `msg` plus
+any category-specific fields:
+
+| Struct              | Extra fields   | Raised when |
+|---------------------|----------------|-------------|
+| `ConnectionError`   | `host`         | DNS / socket / connect failure |
+| `Timeout`           | `host`         | connect/send/recv exceeded the `timeout` |
+| `SSLError`          | `hostname`     | TLS handshake / certificate verification failure |
+| `HTTPError`         | `status_code`  | `raise_for_status()` on a 4xx/5xx |
+| `InvalidURL`        | —              | malformed URL |
+| `UnsupportedScheme` | `scheme`       | non-`http(s)` scheme |
+| `RequestException`  | —              | generic / fallback |
+
+You raise them directly (`raise ConnectionError("...", host=h)`); Mojo wraps the struct in its
+builtin `Error`. Leaf functions that raise exactly one category carry a **typed** `raises` clause
+(e.g. `_dns.resolve` is `raises ConnectionError`, `TLSConnection.connect` is `raises SSLError`,
+`Response.raise_for_status` is `raises HTTPError`).
+
+Because Mojo's `Error` is a builtin wrapper with **no runtime field/type recovery** across a bare
+`raises` boundary (and no multi-type `raises` union), the orchestration layer stays bare `raises`
+and you classify a caught error by its rendered category prefix via `exception_kind()`:
 
 ```mojo
-from requests.exceptions import connection_error, http_error, timeout_error, ssl_error, exception_kind
+from requests.exceptions import exception_kind
 
 try:
     var r = requests.get(url, timeout=5.0)
     r.raise_for_status()
 except e:
     var kind = exception_kind(e)   # "ConnectionError" | "Timeout" | "HTTPError" | "SSLError" | ...
-    print("failed:", kind, e)
+    print("failed:", kind, e)      # `e` renders as e.g. "SSLError: certificate verify failed"
 ```
+
+`exception_kind()` matches the stable prefix each struct's `write_to` emits (pinned by
+`comptime *_PREFIX` constants so the classifier and the structs can't drift). The `Session`
+connect/send/recv paths re-raise the original typed error with `raise e^`, so an SSL handshake
+failure during `s.get("https://…")` surfaces as `SSLError: …` rather than being flattened into
+`RequestException`. See [`STRUGGLES.md`](STRUGGLES.md) §4 for why typed dispatch is only partially
+achievable in this Mojo build.
 
 ## TLS verification
 

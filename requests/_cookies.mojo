@@ -7,7 +7,7 @@
 from ._url import parse_url, _find
 
 
-struct CookieJar:
+struct CookieJar(Movable):
     """A simple cookie store: maps cookie name → value.
 
     Cookies are stored globally (not per-host) for simplicity. For a v1 client this matches

@@ -124,6 +124,11 @@ def _make_https_handler(certfile: str) -> type:
     """A request handler that sets HSTS-less headers + serves the same tree."""
 
     class Handler(SimpleHTTPRequestHandler):
+        # HTTP/1.1 enables persistent connections (keep-alive) so the client's connection
+        # pool can be exercised. SimpleHTTPRequestHandler emits Content-Length for file GETs,
+        # so responses are self-delimiting and the socket stays reusable.
+        protocol_version = "HTTP/1.1"
+
         # Don't spam stderr with per-request logs.
         def log_message(self, fmt, *args):  # noqa: A003 - signature from base
             pass

@@ -278,16 +278,27 @@ IPv6 literal failed immediately.
 (`#include <sys/socket.h>`; `printf("AF_INET6=%d\n", AF_INET6)`). The original plan assumed
 they were identical; they are not.
 
-**Fix:** Don't hard-code `AF_INET6` anywhere. For literal parsing, route IPv6 through
-`getaddrinfo(host, AI_NUMERICHOST)` instead of `inet_pton(AF_INET6, ...)` — `getaddrinfo`
-reports the correct per-platform `ai_family`. For `socket()` / `sin6_family`, carry the raw
-`ai_family` value through in `ResolvedAddress.pf` and pass *that* (not a comptime constant).
-Family detection in the addrinfo walk compares against the portable `AF_INET` (2) and treats
-anything else as IPv6 — with our `AF_UNSPEC` + `SOCK_STREAM` hints, `getaddrinfo` only ever
-returns AF_INET or AF_INET6, so this is safe.
+**Fix:** Don't hard-code `AF_INET6` anywhere. **Discover it at runtime** with `_af_inet6()`:
+call `inet_pton(candidate, "::1", &dst)` against each known family value (`10` Linux, `30`
+macOS/BSD) and keep whichever returns `1`. For `socket()` / `sin6_family`, carry that value
+through in `ResolvedAddress.pf` and pass *that* (not a comptime constant). Family detection in
+the addrinfo walk compares against the portable `AF_INET` (2) and treats anything else as IPv6
+— with our `AF_UNSPEC` + `SOCK_STREAM` hints, `getaddrinfo` only ever returns AF_INET or
+AF_INET6, so this is safe.
 
-**Where:** [`requests/_dns.mojo`](requests/_dns.mojo) (no `AF_INET6` comptime const exists;
-family carried via `ResolvedAddress.pf`), [`requests/_net.mojo`](requests/_net.mojo) `_do_connect`.
+**Correction (2026-07):** an earlier version of this Fix said to route IPv6 literals through
+`getaddrinfo(host, AI_NUMERICHOST)` "because it reports the correct per-platform `ai_family`".
+That was **wrong in practice** — `getaddrinfo` consults the kernel's configured address families
+and **FAILS for `::1` / `2001:db8::1` on hosts with no IPv6 networking** (GitHub ubuntu runners),
+even though the text is valid. It broke `test_resolve_ipv6_*` on ubuntu-latest CI (see commit
+`3d42d01`). `inet_pton` is a pure userspace text→binary parser with no kernel dependency, so it
+works everywhere — which is why literal parsing now uses `_af_inet6()` + `inet_pton`, and
+`getaddrinfo` is reserved for the *hostname* path only. The `AI_NUMERICHOST` comptime const was
+deleted (dead code).
+
+**Where:** [`requests/_dns.mojo`](requests/_dns.mojo) — `_af_inet6()` probe + `resolve()` IPv6
+branch (no `AF_INET6` comptime const exists; family carried via `ResolvedAddress.pf`),
+[`requests/_net.mojo`](requests/_net.mojo) `_do_connect`.
 
 ### 5.7 Sliced-String host handed to `getaddrinfo` gets clobbered (same class as §1.1)
 
@@ -335,7 +346,19 @@ Mojo has no mutable module-level state. So we can't cache the libssl handle glob
 `TLSConnection` opens (and closes) its own `OwnedDLHandle`. There's a small cost but it's the
 only correct option.
 
-**Where:** [`requests/_tls.mojo`](requests/_tls.mojo) `_load_libssl` (~L306-333).
+**Symptom (exact):** a top-level `var x: c_int = ...` fails to *compile* with
+`global variables are not supported; move this into a function body or use 'comptime' to declare
+a constant`. This is a hard parse error, not a runtime issue — the module won't build at all.
+`comptime X = ...` works for *immutable* constants, but there is no mutable equivalent.
+
+**Consequence for caching:** you cannot memoize an expensive probe in a module-level cache. The
+`_af_inet6()` DNS probe (§5.6) originally tried `var _af_inet6_cache: c_int = -1` and hit exactly
+this error (commit `3d42d01`); the fix was to drop the cache and just re-probe (cheap). Any
+"compute once, stash globally" pattern must instead thread the value through a struct field or
+recompute.
+
+**Where:** [`requests/_tls.mojo`](requests/_tls.mojo) `_load_libssl` (~L306-333),
+[`requests/_dns.mojo`](requests/_dns.mojo) `_af_inet6()`.
 
 ### 6.4 Async exists (`std.runtime.asyncrt`); threading primitives do not
 
@@ -408,6 +431,41 @@ In `iter_content`, copying bytes out of a borrowed `Optional.value()` can't be d
 
 **Where:** [`requests/models.mojo`](requests/models.mojo) (~L152).
 
+### 7.4 A consuming `__enter__` can't coexist with `__exit__`
+
+**Symptom:** Adding both `def __enter__(var self) -> Self` and `def __exit__(mut self)` to
+`Session` (for `with Session() as s:`) failed to compile:
+`context manager of type 'Session' defines a consuming __enter__ method as well as an __exit__
+method; either remove 'var' from its '__enter__' method or remove the '__exit__' method`.
+
+**Cause:** A *consuming* `__enter__` (`var self`) hands ownership of the context manager to the
+`with` block, so the value is destroyed at block exit — Mojo runs `__del__` there and considers
+a separate `__exit__` redundant/conflicting. The two cleanup hooks are mutually exclusive.
+
+**Fix:** Keep the consuming `__enter__` and put teardown in `__del__` (which runs on block exit,
+including during exception unwind). `Session.__del__` drains the connection pool, so no
+`__exit__` is needed. (The alternative — non-consuming `__enter__(mut self)` + `__exit__` — would
+not give the block an owned Session.)
+
+**Where:** [`requests/session.mojo`](requests/session.mojo) `Session.__enter__` / `__del__`.
+
+### 7.5 A struct field type used with `^` must itself conform to `Movable`
+
+**Symptom:** Giving `Session` a hand-written `__moveinit__` that did `self.cookies =
+existing.cookies^` failed: `cannot synthesize move constructor because field 'cookies' has
+non-movable and non-implicitly-copyable type 'CookieJar'`.
+
+**Cause:** `CookieJar` was declared `struct CookieJar:` with no trait conformance. A plain
+struct is neither `Movable` nor `ImplicitlyCopyable` by default, so it can't be transferred with
+`^` — even though its only field (a `Dict`) is movable. Trait conformance is not inferred from
+fields; you must declare it.
+
+**Fix:** Declare `struct CookieJar(Movable):`. (This surfaced only once something moved a
+`Session` by value — the `with`-statement's consuming `__enter__` and the added `__del__`, which
+together require an explicit `__moveinit__`, see §3.1.)
+
+**Where:** [`requests/_cookies.mojo`](requests/_cookies.mojo).
+
 ---
 
 ## 8. Build / toolchain / CI
@@ -436,6 +494,22 @@ The Python benchmark scripts must run from `/tmp` (or be copied there) — other
 Mojo `requests/` package dir shadows pip's `requests`.
 
 **Where:** [`benchmark/run.sh`](benchmark/run.sh) (~L58, L70).
+
+### 8.6 `mojo format` rejects a builtin name (`any`) used as a local variable — the compiler doesn't
+
+**Symptom:** `_pool.mojo` **compiled and ran fine**, but `mojo format` (hence CI's `fmt-check`)
+aborted with `Cannot parse: 352:14:  out = out * 10 + Int(b - 0x30)` — pointing near, but not
+exactly at, a `var any = False` / `... if not any else ...` local.
+
+**Cause:** `any` is a builtin (like Python's `any()`). The *compiler* tolerates shadowing it with
+a local `var any`, but the *formatter*'s parser does not — and its error line/column points at
+the next statement, not the offending name, so it's easy to misread.
+
+**Fix:** Don't name locals after builtins. Renamed `any` → `seen` (and, defensively, avoid `out`
+/ `any` / `len` / `id` as identifiers). If `mojo format` reports `Cannot parse` on a file that
+compiles, suspect a builtin-shadowing local near the reported line.
+
+**Where:** [`requests/_pool.mojo`](requests/_pool.mojo) `_header_content_length` / `_parse_status`.
 
 ### 8.5 Platform detection — three spellings, one works in this build
 
@@ -480,8 +554,11 @@ the *library* needs to pass to libc — like `AF_INET6` (macOS 30, Linux 10) —
 
 - §1.3's errno detection uses `getsockopt(SO_ERROR)` — a POSIX API that exists on every platform
   — so no OS branch is needed at all.
-- The planned IPv6 work ([`TODO.md`](TODO.md)) uses `getaddrinfo(AF_UNSPEC)` and reads
-  `ai_family` back at runtime, so the socket layer never names `AF_INET6` or branches on OS.
+- The IPv6 work uses two runtime tricks instead of an OS branch: the *hostname* path reads
+  `ai_family` back from `getaddrinfo(AF_UNSPEC)`, and the *literal* path discovers `AF_INET6`
+  with `_af_inet6()` — an `inet_pton` probe over the known candidate values (§5.6). Both source
+  the platform value at runtime, so the socket layer never hard-codes `AF_INET6` or `comptime
+  if`-branches on OS.
 
 There appears to be no `compiles(...)` intrinsic in this build for guarding speculative calls, so
 you cannot `comptime if compiles(...)` your way past a missing symbol — pick an API that exists,

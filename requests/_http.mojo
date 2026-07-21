@@ -20,12 +20,17 @@ def build_request(
     imm url: URL,
     imm headers: Dict[String, String],
     body: String,
+    keep_alive: Bool = False,
 ) -> String:
     """Assemble the HTTP/1.1 request wire format.
 
     - Inserts a default ``Host`` header if absent.
     - Inserts ``Content-Length`` when a body is present.
-    - Inserts ``Connection: close`` so the server closes after responding (simplest reliable read-to-EOF).
+    - Sets the ``Connection`` header: ``keep-alive`` when ``keep_alive`` is True (the caller
+      intends to pool/reuse the socket and reads the body via framing — Content-Length or
+      chunked — rather than to EOF), otherwise ``close`` (the server closes after responding,
+      the simplest reliable read-to-EOF). An explicit caller-supplied ``Connection`` header
+      always wins.
     """
     var h = headers.copy()
     if not _has_key_ci(h, "Host"):
@@ -33,7 +38,7 @@ def build_request(
     if body.byte_length() > 0 and not _has_key_ci(h, "Content-Length"):
         h["Content-Length"] = String(body.byte_length())
     if not _has_key_ci(h, "Connection"):
-        h["Connection"] = "close"
+        h["Connection"] = "keep-alive" if keep_alive else "close"
 
     var lines: List[String] = []
     lines.append(method + " " + url.request_target() + " HTTP/1.1")
