@@ -11,25 +11,39 @@ from ._dns import resolve as _dns_resolve
 from ._tls import TLSConnection
 from ._cookies import CookieJar
 from ._streaming import StreamingConn
+from ._pool import KeptAliveConn
+from ._net import ResolvedAddress
 from .models import Response, Headers
 from .exceptions import RequestException
 from std.memory import OwnedPointer
 from std.ffi import c_int, OwnedDLHandle
 
 
-struct Session:
+struct Session(Movable):
     """A request session holding default headers applied to every request.
+
+    Keep-alive: non-streaming requests reuse TCP/TLS connections to the same endpoint
+    (scheme/host/port). After a self-delimiting response (Content-Length or chunked, and no
+    ``Connection: close``), the live connection is returned to an internal pool and picked up by
+    the next request to that endpoint — amortizing the TCP and (for HTTPS) TLS handshake. A
+    pooled connection found stale on reuse is transparently retried on a fresh socket.
 
     Usage:
         var s = Session()
         s.headers["User-Agent"] = "myapp/1.0"
         var r = s.get("http://example.com")
+
+    Context-manager form (auto-closes pooled connections on exit):
+        with Session() as s:
+            var r1 = s.get("https://example.com")
+            var r2 = s.get("https://example.com")   # reuses r1's connection
     """
 
     var headers: Dict[String, String]
     var cookies: CookieJar
     var verify: Bool
     var ca_bundle: Optional[String]
+    var _pool: List[KeptAliveConn]
 
     def __init__(out self):
         self.headers = {}
@@ -40,12 +54,49 @@ struct Session:
         # and per-Session via the verify/ca_bundle parameters).
         self.verify = True
         self.ca_bundle = None
+        self._pool = []
         # Warm up the DNS resolver: the first getaddrinfo call in a process can fail on some
         # systems (lazy resolver init). Doing a throwaway resolve here primes it for real use.
         try:
             _ = _dns_resolve("localhost")
         except _:
             pass
+
+    def __moveinit__(out self, mut existing: Self):
+        """Move the session; the pool transfers so the source's destructor closes nothing.
+
+        Hand-written because the added ``__del__`` (draining the connection pool) suppresses the
+        synthesized move constructor (STRUGGLES.md §3.1)."""
+        self.headers = existing.headers^
+        self.cookies = existing.cookies^
+        self.verify = existing.verify
+        self.ca_bundle = existing.ca_bundle^
+        self._pool = existing._pool^
+
+    def __del__(deinit self):
+        """Close every pooled connection when the Session is dropped (no fd/SSL leaks).
+        """
+        self.close()
+
+    def __enter__(var self) -> Self:
+        """Enter a ``with`` block. The Session is moved into the block and its ``__del__`` closes
+        every pooled connection when the block exits (normally or via an exception) — so no
+        separate ``__exit__`` is needed (and Mojo forbids pairing a consuming ``__enter__`` with
+        one)."""
+        return self^
+
+    def close(mut self):
+        """Close and discard every idle pooled connection. Idempotent."""
+        while len(self._pool) > 0:
+            var c = self._pool.pop()
+            c.close()
+
+    def _pool_find(self, scheme: String, host: String, port: Int) -> Int:
+        """Index of an idle pooled connection matching the endpoint, or -1."""
+        for i in range(len(self._pool)):
+            if self._pool[i].matches(scheme, host, port):
+                return i
+        return -1
 
     def request(
         mut self,
@@ -210,75 +261,57 @@ struct Session:
             if not _has_key_ci(merged, "Content-Type"):
                 merged["Content-Type"] = "application/x-www-form-urlencoded"
 
-        # Build the wire request.
-        var req_str = build_request(method, u, merged, body)
+        # Build the wire request. Streaming reads the body to EOF (Connection: close); the
+        # pooled non-streaming path reads a framed body and reuses the socket (Connection:
+        # keep-alive).
+        var is_https = scheme == "https"
+        var req_str = build_request(
+            method, u, merged, body, keep_alive=not stream
+        )
 
         # Compute the final URL.
         var final_url = u.origin() + u.path
         if u.query.byte_length() > 0:
             final_url = final_url + "?" + u.query
 
-        # Connect, send. Branch on scheme: https wraps the TCP socket in TLS.
-        # NOTE: the connect/send/recv try blocks are split per scheme because Mojo 1.0
-        # unifies exception types within a single try block — a typed `raises SSLError`
-        # call (tls.*) cannot coexist with a bare `raises` call (sock.*) in the same block.
-        var sock = TCPSocket()
-        var tls = TLSConnection()
-        var is_https = scheme == "https"
-        if is_https:
-            try:
-                sock.connect_ip(ip, port, timeout)
-                tls.connect(sock.fd_value(), host, verify, ca_bundle)
-            except e:
-                # Close resources, then re-raise the ORIGINAL typed error (SSLError /
-                # ConnectionError / Timeout) preserving its concrete type — instead of
-                # flattening it into a RequestException.
-                tls.close()
-                sock.close()
-                raise e^
-        else:
-            try:
-                sock.connect_ip(ip, port, timeout)
-            except e:
-                sock.close()
-                raise e^
-
-        # Send the request.
-        if is_https:
-            try:
-                tls.send_all(req_str)
-            except e:
-                tls.close()
-                sock.close()
-                raise e^
-        else:
-            try:
-                sock.send_all(req_str)
-            except e:
-                sock.close()
-                raise e^
-
         if stream:
-            # Streaming: read headers incrementally, keep the connection alive in the Response.
+            # Streaming: fresh connection (never pooled), read headers incrementally, keep it
+            # alive inside the Response. NOTE: the connect/send try blocks are split per scheme
+            # because Mojo 1.0 unifies exception types within a single try block — a typed
+            # `raises SSLError` call (tls.*) cannot coexist with a bare `raises` call (sock.*).
+            var sock = TCPSocket()
+            var tls = TLSConnection()
+            if is_https:
+                try:
+                    sock.connect_ip(ip, port, timeout)
+                    tls.connect(sock.fd_value(), host, verify, ca_bundle)
+                    tls.send_all(req_str)
+                except e:
+                    tls.close()
+                    sock.close()
+                    raise e^
+            else:
+                try:
+                    sock.connect_ip(ip, port, timeout)
+                    sock.send_all(req_str)
+                except e:
+                    sock.close()
+                    raise e^
             return self._stream_response(sock^, tls^, is_https, host, final_url)
 
-        # Non-streaming: read the full response, then close.
-        var raw: List[UInt8]
-        if is_https:
-            try:
-                raw = tls.recv_all()
-            except e:
-                tls.close()
-                sock.close()
-                raise e^
-        else:
-            try:
-                raw = sock.recv_all()
-            except e:
-                sock.close()
-                raise e^
-        tls.close()
-        sock.close()
+        # Non-streaming: exchange over a pooled (or fresh) keep-alive connection.
+        var raw = self._exchange(
+            method,
+            req_str,
+            scheme,
+            host,
+            port,
+            ip,
+            timeout,
+            verify,
+            ca_bundle,
+            is_https,
+        )
         if len(raw) == 0:
             raise RequestException("empty response from server")
 
@@ -287,6 +320,109 @@ struct Session:
         # Extract Set-Cookie headers into the session jar.
         self.cookies.extract_from_headers(resp.headers, host)
         return resp^
+
+    def _exchange(
+        mut self,
+        method: String,
+        req_str: String,
+        scheme: String,
+        host: String,
+        port: Int,
+        ip: ResolvedAddress,
+        timeout: Optional[Float64],
+        verify: Bool,
+        ca_bundle: Optional[String],
+        is_https: Bool,
+    ) raises -> List[UInt8]:
+        """Send ``req_str`` and read one framed response, reusing a pooled connection when possible.
+
+        Tries an idle pooled connection for this endpoint first; if its send/recv fails (a stale
+        keep-alive socket the server already dropped), it is closed and the request is retried
+        once on a fresh connection. A connection that yields a self-delimiting, non-``close``
+        response is returned to the pool; otherwise it is closed.
+        """
+        var reusable = False
+        var raw = List[UInt8]()
+
+        # Attempt reuse.
+        var idx = self._pool_find(scheme, host, port)
+        if idx >= 0:
+            var pooled = self._pool.pop(idx)
+            var ok = True
+            try:
+                pooled.send_all(req_str)
+                raw = pooled.recv_framed(method, reusable)
+            except e:
+                pooled.close()
+                ok = False
+            if ok:
+                if reusable:
+                    self._pool.append(pooled^)
+                else:
+                    pooled.close()
+                return raw^
+            # else: stale — fall through to a fresh connection.
+
+        # Fresh connection.
+        var fresh = self._connect_new(
+            scheme, host, port, ip, timeout, verify, ca_bundle, is_https
+        )
+        fresh.send_all(req_str)
+        raw = fresh.recv_framed(method, reusable)
+        if reusable:
+            self._pool.append(fresh^)
+        else:
+            fresh.close()
+        return raw^
+
+    def _connect_new(
+        mut self,
+        scheme: String,
+        host: String,
+        port: Int,
+        ip: ResolvedAddress,
+        timeout: Optional[Float64],
+        verify: Bool,
+        ca_bundle: Optional[String],
+        is_https: Bool,
+    ) raises -> KeptAliveConn:
+        """Open a fresh TCP (and, for HTTPS, TLS) connection and hand back a KeptAliveConn that
+        owns the live fd + SSL* + libssl handle (stolen from the throwaway socket/TLS wrappers,
+        the same way streaming does). NOTE: split per scheme for the same typed-`raises` reason
+        as the streaming path."""
+        var sock = TCPSocket()
+        var tls = TLSConnection()
+        if is_https:
+            try:
+                sock.connect_ip(ip, port, timeout)
+                tls.connect(sock.fd_value(), host, verify, ca_bundle)
+            except e:
+                tls.close()
+                sock.close()
+                raise e^
+            var fd = sock.fd_value()
+            var ssl_ptr = tls._steal_ssl()
+            var handle = tls._steal_libssl()
+            sock._disown()
+            tls._disown()
+            return KeptAliveConn(
+                scheme, host, port, fd, True, handle^, ssl_ptr^
+            )
+        else:
+            try:
+                sock.connect_ip(ip, port, timeout)
+            except e:
+                sock.close()
+                raise e^
+            var fd = sock.fd_value()
+            sock._disown()
+            var no_handle: Optional[OwnedPointer[OwnedDLHandle]] = None
+            var no_ssl: Optional[
+                UnsafePointer[UInt8, MutUntrackedOrigin]
+            ] = None
+            return KeptAliveConn(
+                scheme, host, port, fd, False, no_handle^, no_ssl^
+            )
 
     def _stream_response(
         mut self,

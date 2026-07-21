@@ -83,6 +83,9 @@ jobs:
       - name: Streaming tests (local server)
         run: pixi run test-streaming
 
+      - name: Keep-alive / connection-pool tests (local server)
+        run: pixi run test-keepalive
+
       - name: Stop local test server
         if: always()
         run: |
