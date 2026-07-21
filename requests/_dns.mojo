@@ -5,12 +5,17 @@
 # order bytes, as expected by `sockaddr_in6.sin6_addr`).
 #
 # Resolution order:
-#   1. `inet_pton(AF_INET, …)`                 — dotted-decimal literal → IPv4.
-#   2. `getaddrinfo(host, AI_NUMERICHOST)`      — IPv6 literal (e.g. "::1", "fe80::1") → IPv6.
-#   3. `getaddrinfo(host, AF_UNSPEC)`           — hostname; returns A + AAAA records. We
-#      **prefer IPv4** (first AF_INET result) for backward compatibility with IPv4-only targets
-#      and fall back to the first AF_INET6 when no IPv4 record is available. A real
-#      happy-eyeballs (RFC 8305) client would race both — that's deferred (see TODO.md).
+#   1. `inet_pton(AF_INET, …)`     — dotted-decimal literal → IPv4.
+#   2. `inet_pton(AF_INET6, …)`    — IPv6 literal (e.g. "::1", "fe80::1") → IPv6.
+#   3. `getaddrinfo(host, AF_UNSPEC)` — hostname; returns A + AAAA records. We **prefer IPv4**
+#      (first AF_INET result) for backward compatibility with IPv4-only targets and fall back to
+#      the first AF_INET6 when no IPv4 record is available. A real happy-eyeballs (RFC 8305)
+#      client would race both — that's deferred (see TODO.md).
+#
+# Why inet_pton (not getaddrinfo) for IPv6 literals: getaddrinfo consults the kernel's configured
+# address families and FAILS for "::1" on hosts with no IPv6 networking (e.g. GitHub ubuntu
+# runners) — even though "::1" is valid text. inet_pton is a pure userspace text→binary parser,
+# so it works regardless of kernel IPv6 support. We use it for both v4 and v6 literal parsing.
 
 from std.ffi import external_call, c_int
 from std.memory import alloc
@@ -21,8 +26,8 @@ from .exceptions import ConnectionError
 # POSIX constants.
 # AF_INET (2), AF_UNSPEC (0), SOCK_STREAM (1), and AI_NUMERICHOST (0x4) are identical on
 # macOS and Linux. **AF_INET6 is NOT portable** — it's 30 on macOS/BSD and 10 on Linux — so we
-# never hard-code it; for IPv6 literal parsing we go through getaddrinfo (which reports the
-# correct ai_family per-platform) instead of inet_pton(AF_INET6, ...).
+# never hard-code it; _af_inet6() discovers the platform's value at runtime via an inet_pton
+# probe (see below).
 comptime AF_INET: c_int = 2
 comptime AF_UNSPEC: c_int = 0
 comptime SOCK_STREAM: c_int = 1
@@ -34,6 +39,13 @@ struct InAddr:
     """libc `struct in_addr { in_addr_t s_addr; }` — a 32-bit address."""
 
     var s_addr: UInt32
+
+
+@fieldwise_init
+struct In6Addr:
+    """libc `struct in6_addr { uint8_t s6_addr[16]; }` — a 128-bit address."""
+
+    var bytes: SIMD[DType.uint8, 16]
 
 
 # Minimal mirror of `struct sockaddr_in` (16 bytes).
@@ -112,10 +124,38 @@ def _v4(addr: UInt32) -> ResolvedAddress:
 def _v6(pf: c_int, bytes: SIMD[DType.uint8, 16]) -> ResolvedAddress:
     """Build an IPv6 ResolvedAddress (network order, 16 bytes).
 
-    ``pf`` is the platform ``ai_family`` (AF_INET6) from ``getaddrinfo`` — passed in explicitly
-    because its integer value varies by platform.
+    ``pf`` is the platform ``AF_INET6`` value (30 on macOS/BSD, 10 on Linux) — passed in
+    explicitly because it varies by platform.
     """
     return ResolvedAddress(Int8(6), Int8(pf), UInt32(0), bytes)
+
+
+def _af_inet6() -> c_int:
+    """Discover this platform's ``AF_INET6`` value (30 on macOS/BSD, 10 on Linux) at runtime.
+
+    ``AF_INET6`` isn't a portable constant, so we probe: call ``inet_pton(family, "::1", &dst)``
+    with each known candidate family — whichever returns 1 (success) is the correct value for
+    this platform.
+
+    This is a pure userspace text→binary parse: it works on hosts with no IPv6 networking
+    (GitHub ubuntu runners, containers with IPv6 disabled), unlike getaddrinfo which consults
+    the kernel and fails for "::1" when IPv6 isn't configured. Returns -1 if no candidate
+    family works (shouldn't happen on any supported platform).
+
+    Not cached: Mojo has no module-level mutable state, and the probe is cheap (a userspace
+    parse of "::1"), only hit on the IPv6-literal branch of ``resolve()``.
+    """
+    var probe = _cstr("::1")
+    var dst = alloc[In6Addr](1)
+    for candidate in [c_int(10), c_int(30)]:  # Linux, then macOS/BSD
+        var rc = external_call["inet_pton", c_int](candidate, probe, dst)
+        if rc == c_int(1):
+            dst.free()
+            probe.free()
+            return candidate
+    dst.free()
+    probe.free()
+    return c_int(-1)
 
 
 def _take(imm opt: Optional[ResolvedAddress]) -> ResolvedAddress:
@@ -173,14 +213,23 @@ def resolve(host: String) raises ConnectionError -> ResolvedAddress:
     if rc4 == c_int(1):
         return _v4(v4_addr)
 
-    # IPv6 literal or hostname: both go through getaddrinfo. We don't use inet_pton(AF_INET6, ...)
-    # because AF_INET6 is NOT a portable comptime value (30 on macOS/BSD, 10 on Linux) —
-    # getaddrinfo reports the correct ai_family per-platform. AI_NUMERICHOST (set in the first
-    # attempt) makes the call fail instantly for non-literals, so there's no DNS round-trip cost
-    # for the IPv6-literal probe; only real hostnames reach the retry/backoff path.
-    var numeric = _getaddrinfo(host, numeric=True)
-    if numeric != None:
-        return _take(numeric)
+    # Try an IPv6 literal via inet_pton(AF_INET6, ...). The platform's AF_INET6 value is discovered
+    # by _af_inet6() (a pure userspace probe — no kernel IPv6 needed). inet_pton is used here
+    # instead of getaddrinfo(AI_NUMERICHOST) because getaddrinfo consults the kernel and FAILS for
+    # "::1" on hosts with no IPv6 networking (e.g. GitHub ubuntu runners), while inet_pton is a
+    # pure text→binary parser that works regardless.
+    var af_inet6 = _af_inet6()
+    if af_inet6 != c_int(-1):
+        var chost6 = _cstr(host)
+        var dst6 = alloc[In6Addr](1)
+        var rc6 = external_call["inet_pton", c_int](af_inet6, chost6, dst6)
+        var v6_bytes = dst6[].bytes
+        dst6.free()
+        chost6.free()
+        if rc6 == c_int(1):
+            return _v6(af_inet6, v6_bytes)
+
+    # Hostname: resolve via getaddrinfo (queries both A and AAAA records).
     return _resolve_by_name(host)
 
 
@@ -197,7 +246,7 @@ def _resolve_by_name(host: String) raises ConnectionError -> ResolvedAddress:
     with a localhost resolve, but network resolvers can still hiccup on first contact with a real
     hostname.
     """
-    var resolved = _getaddrinfo(host, numeric=False)
+    var resolved = _getaddrinfo(host)
     if resolved != None:
         return _take(resolved)
     raise ConnectionError(
@@ -206,25 +255,27 @@ def _resolve_by_name(host: String) raises ConnectionError -> ResolvedAddress:
 
 
 def _getaddrinfo(
-    host: String, numeric: Bool
+    host: String,
 ) raises ConnectionError -> Optional[ResolvedAddress]:
-    """Run ``getaddrinfo`` and pick one address (prefer IPv4, fall back to IPv6).
+    """Resolve a hostname via ``getaddrinfo`` (thread-safe, heap-allocated) and pick one address
+    (prefer IPv4, fall back to IPv6).
 
-    ``numeric=True`` sets ``AI_NUMERICHOST`` so the call only accepts IP literals (no DNS) and
-    fails instantly for hostnames — used by ``resolve()`` as the IPv6-literal probe. ``numeric=False``
-    is the real hostname path with retry/backoff.
+    Retries up to 5 times with exponential backoff (50/100/200/400ms via std.time.sleep): the
+    first ``getaddrinfo`` in a fresh process can fail transiently (lazy resolver init /
+    heap-state-dependent behavior in Mojo 1.0 beta).
 
-    Returns ``None`` when the lookup yields no usable address (numeric probe against a hostname,
-    or an empty result list); raises ``ConnectionError`` on a retry-exhausted name-resolution
-    failure (only on the non-numeric path — a failed numeric probe returns None).
+    Returns ``None`` only if the result list is empty; raises ``ConnectionError`` on retry
+    exhaustion. Family detection treats ``AF_INET`` (portable: 2) as IPv4 and **anything else**
+    as IPv6 — with our ``AF_UNSPEC`` + ``SOCK_STREAM`` hints, getaddrinfo only ever returns
+    AF_INET or AF_INET6, so the non-AF_INET branch is AF_INET6. The raw ``ai_family`` is carried
+    as ``pf`` (it's the platform-correct value: AF_INET6 is 30 on macOS/BSD, 10 on Linux).
 
-    Family detection: ``getaddrinfo`` reports the platform-correct family in each node's
-    ``ai_family``. We treat ``AF_INET`` (portable: 2) as IPv4 and **anything else** as IPv6 —
-    this avoids hard-coding ``AF_INET6`` (which is 30 on macOS/BSD, 10 on Linux). With our hints
-    (``AF_UNSPEC`` + ``SOCK_STREAM``) getaddrinfo only ever returns AF_INET or AF_INET6.
+    Note: this is the *hostname* path. Literal parsing (v4 and v6) is done in ``resolve()``
+    via ``inet_pton`` — getaddrinfo would FAIL for an IPv6 literal on hosts with no IPv6
+    networking (it consults the kernel), which is why we don't use it for literals.
     """
     var hints = alloc[AddrInfo](1)
-    hints[].ai_flags = AI_NUMERICHOST if numeric else 0
+    hints[].ai_flags = 0
     hints[].ai_family = AF_UNSPEC
     hints[].ai_socktype = SOCK_STREAM
     hints[].ai_protocol = 0
@@ -242,9 +293,7 @@ def _getaddrinfo(
 
     var rc = c_int(-1)
     var attempt = 0
-    # Numeric probes are all-or-nothing (no DNS) — one attempt, no retry/backoff.
-    var max_attempts = 1 if numeric else 5
-    while attempt < max_attempts:
+    while attempt < 5:
         rc = external_call["getaddrinfo", c_int](
             chost,
             c_int(
@@ -263,10 +312,6 @@ def _getaddrinfo(
     chost.free()
     if rc != c_int(0):
         result_addr.free()
-        # Numeric probe miss (hostname, not a literal) → None, not an error.
-        # Name-resolution retry exhaustion → ConnectionError.
-        if numeric:
-            return None
         raise ConnectionError(
             String(t"DNS resolution failed for host: {host}"), host=host
         )
@@ -274,8 +319,6 @@ def _getaddrinfo(
     var first = result_addr[]
     result_addr.free()
     if Int(first) == 0:
-        if numeric:
-            return None
         raise ConnectionError(
             String(t"DNS returned no addresses for host: {host}"), host=host
         )
