@@ -6,7 +6,7 @@
 
 from std.ffi import external_call, c_int
 from std.memory import alloc
-from .exceptions import ConnectionError, Timeout
+from .exceptions import ConnectionError, Timeout, ConnectTimeout, ReadTimeout
 
 
 # POSIX socket constants (kept as comptime c_int so they pass to external_call cleanly).
@@ -206,10 +206,12 @@ struct TCPSocket:
                     String(t"connect() to {host_label}:{String(port)} failed"),
                     host=host_label,
                     was_timeout=was_timeout,
+                    connect_phase=True,
                 )
             self._io_failure(
                 String(t"connect() to port {String(port)} failed"),
                 was_timeout=was_timeout,
+                connect_phase=True,
             )
 
     def _set_timeouts(mut self, timeout_secs: Float64) raises:
@@ -252,10 +254,19 @@ struct TCPSocket:
         return e == EAGAIN_MACOS or e == EAGAIN_LINUX
 
     def _io_failure(
-        self, msg: String, *, host: String = "", was_timeout: Bool = False
+        self,
+        msg: String,
+        *,
+        host: String = "",
+        was_timeout: Bool = False,
+        connect_phase: Bool = False,
     ) raises:
-        """Raise ``Timeout`` if ``was_timeout`` is set (caller pre-queried SO_ERROR before
+        """Raise a timeout error if ``was_timeout`` is set (caller pre-queried SO_ERROR before
         closing the socket); otherwise raise ``ConnectionError``.
+
+        The timeout category is phase-specific (mirroring Python requests): ``ConnectTimeout``
+        when the timeout expired while establishing the connection, ``ReadTimeout`` when it
+        expired during send/recv.
 
         ``was_timeout`` is passed explicitly because callers must query SO_ERROR while the fd
         is still live (before ``_raw_close``), then close, then come here to raise.
@@ -264,7 +275,9 @@ struct TCPSocket:
         callers (which also raise both categories) propagate as bare ``raises``.
         """
         if was_timeout:
-            raise Timeout(msg, host=host)
+            if connect_phase:
+                raise ConnectTimeout(msg, host=host)
+            raise ReadTimeout(msg, host=host)
         raise ConnectionError(msg, host=host)
 
     def send_all(mut self, data: String) raises:

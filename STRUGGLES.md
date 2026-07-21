@@ -597,6 +597,36 @@ These are called out so they don't get reported as bugs:
 - **Incremental chunked dechunking is not implemented** — streaming a chunked body reads until
   close instead. ([`_streaming.mojo`](requests/_streaming.mojo) ~L80)
 
+### 10.1 Python `requests` top-level surface intentionally NOT ported
+
+The package mirrors the *practical* subset of `requests`. These top-level names exist in
+Python's `requests` but are deliberately absent here — don't file them as gaps:
+
+- **Request objects** — `Request`, `PreparedRequest`. This client builds the wire bytes
+  directly in [`_http.build_request`](requests/_http.mojo); there is no request-object /
+  prepare-then-send layer to expose.
+- **Internal submodules** — `adapters`, `auth`, `certs`, `utils`, `structures`, `hooks`,
+  `compat`, `packages`, `sessions`, `api`, `models`, `status_codes` as *navigable submodules*.
+  Python splits its internals across these; this lib is flatter (one file per concern under
+  `requests/`, re-exported from `__init__.mojo`). The functionality that matters is exposed as
+  top-level names, not as a module tree.
+- **Vendored / stdlib re-exports** — `urllib3`, `ssl`, `chardet_version`,
+  `charset_normalizer_version`, `logging`, `warnings`. No vendoring: TLS is OpenSSL via
+  `dlopen` ([`_tls.mojo`](requests/_tls.mojo)), and there is no charset-detection dependency
+  (bodies decode as lossy UTF-8).
+- **Warning classes** — `DependencyWarning`, `FileModeWarning`, `RequestsDependencyWarning`,
+  `NullHandler`, `check_compatibility` — no warnings/logging subsystem.
+- **`apparent_encoding`** (on `Response`) — needs charset detection (chardet/charset-normalizer),
+  which is not a dependency.
+
+What *was* ported for parity: the module-level verbs (`get`/`post`/…/`request`/`session`), the
+exception hierarchy (incl. `ConnectTimeout` / `ReadTimeout` / `JSONDecodeError` /
+`TooManyRedirects` / `URLRequired`, all emitted by the engine), `codes()`
+([`status_codes.mojo`](requests/status_codes.mojo)), and the `Response` accessors
+(`iter_lines`, `is_redirect`, `is_permanent_redirect`, `links`, `close`). `Response.elapsed`,
+`.history`, `.next`, `.request`, `.raw`, `.connection`, `.cookies` remain unported — they need
+timing/redirect-chain/request-object plumbing not yet in the engine.
+
 ---
 
 ## How to debug when something goes wrong

@@ -34,6 +34,11 @@ comptime INVALID_URL_PREFIX = "InvalidURL"
 comptime UNSUPPORTED_SCHEME_PREFIX = "UnsupportedScheme"
 comptime HTTP_ERROR_PREFIX = "HTTPError"
 comptime SSL_PREFIX = "SSLError"
+comptime CONNECT_TIMEOUT_PREFIX = "ConnectTimeout"
+comptime READ_TIMEOUT_PREFIX = "ReadTimeout"
+comptime JSON_DECODE_PREFIX = "JSONDecodeError"
+comptime TOO_MANY_REDIRECTS_PREFIX = "TooManyRedirects"
+comptime URL_REQUIRED_PREFIX = "URLRequired"
 
 
 # --- Structs --------------------------------------------------------------
@@ -158,6 +163,100 @@ struct SSLError(Movable, Writable):
             writer.write(SSL_PREFIX, ": ", self.msg)
 
 
+struct ConnectTimeout(Movable, Writable):
+    """The request timed out while establishing the connection (connect phase).
+
+    Mirrors Python's ``requests.ConnectTimeout`` (a ConnectionError + Timeout).
+    """
+
+    var msg: String
+    var host: String
+
+    def __init__(out self, msg: String, *, host: String = ""):
+        self.msg = msg
+        self.host = host
+
+    def write_to(self, mut writer: Some[Writer]):
+        if self.host.byte_length() > 0:
+            writer.write(
+                CONNECT_TIMEOUT_PREFIX,
+                ": ",
+                self.msg,
+                " (host=",
+                self.host,
+                ")",
+            )
+        else:
+            writer.write(CONNECT_TIMEOUT_PREFIX, ": ", self.msg)
+
+
+struct ReadTimeout(Movable, Writable):
+    """The server did not send any data in the allotted time (read phase).
+
+    Mirrors Python's ``requests.ReadTimeout``.
+    """
+
+    var msg: String
+    var host: String
+
+    def __init__(out self, msg: String, *, host: String = ""):
+        self.msg = msg
+        self.host = host
+
+    def write_to(self, mut writer: Some[Writer]):
+        if self.host.byte_length() > 0:
+            writer.write(
+                READ_TIMEOUT_PREFIX, ": ", self.msg, " (host=", self.host, ")"
+            )
+        else:
+            writer.write(READ_TIMEOUT_PREFIX, ": ", self.msg)
+
+
+struct JSONDecodeError(Movable, Writable):
+    """The response body could not be parsed as JSON.
+
+    Mirrors Python's ``requests.JSONDecodeError`` (raised by ``Response.json()``).
+    """
+
+    var msg: String
+
+    def __init__(out self, msg: String):
+        self.msg = msg
+
+    def write_to(self, mut writer: Some[Writer]):
+        writer.write(JSON_DECODE_PREFIX, ": ", self.msg)
+
+
+struct TooManyRedirects(Movable, Writable):
+    """The configured redirect limit was exceeded.
+
+    Mirrors Python's ``requests.TooManyRedirects``.
+    """
+
+    var msg: String
+
+    def __init__(out self, msg: String):
+        self.msg = msg
+
+    def write_to(self, mut writer: Some[Writer]):
+        writer.write(TOO_MANY_REDIRECTS_PREFIX, ": ", self.msg)
+
+
+struct URLRequired(Movable, Writable):
+    """A valid URL is required to make a request (none was supplied).
+
+    Mirrors Python's ``requests.URLRequired``.
+    """
+
+    var msg: String
+
+    def __init__(out self, msg: String):
+        self.msg = msg
+
+    def write_to(self, mut writer: Some[Writer]):
+        writer.write(URL_REQUIRED_PREFIX, ": ", self.msg)
+
+
 # --- Classification --------------------------------------------------------
 
 
@@ -172,6 +271,18 @@ def exception_kind(err: Error) -> String:
     a bare-``raises`` propagation boundary. See the module docstring for details.
     """
     var s = String(err)
+    # Check the more specific compound prefixes before their broader relatives
+    # (e.g. ConnectTimeout before ConnectionError/Timeout).
+    if _starts_with(s, CONNECT_TIMEOUT_PREFIX):
+        return CONNECT_TIMEOUT_PREFIX
+    if _starts_with(s, READ_TIMEOUT_PREFIX):
+        return READ_TIMEOUT_PREFIX
+    if _starts_with(s, JSON_DECODE_PREFIX):
+        return JSON_DECODE_PREFIX
+    if _starts_with(s, TOO_MANY_REDIRECTS_PREFIX):
+        return TOO_MANY_REDIRECTS_PREFIX
+    if _starts_with(s, URL_REQUIRED_PREFIX):
+        return URL_REQUIRED_PREFIX
     if _starts_with(s, CONNECTION_PREFIX):
         return CONNECTION_PREFIX
     if _starts_with(s, TIMEOUT_PREFIX):

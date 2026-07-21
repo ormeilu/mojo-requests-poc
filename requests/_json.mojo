@@ -6,7 +6,7 @@
 # NOTE: because JSONValue is recursive (objects/arrays contain JSONValues), the collection fields are
 # heap-allocated behind OwnedPointer so the struct has a fixed, deletable layout.
 
-from .exceptions import RequestException
+from .exceptions import JSONDecodeError
 from std.memory import OwnedPointer
 
 
@@ -64,21 +64,21 @@ struct JSONValue(Copyable, Movable, Writable):
 
     def as_string(self) raises -> String:
         if self.kind != "string":
-            raise RequestException(
+            raise JSONDecodeError(
                 String(t"JSON value is not a string (was {self.kind})")
             )
         return self._str
 
     def as_int(self) raises -> Int:
         if self.kind != "int":
-            raise RequestException(
+            raise JSONDecodeError(
                 String(t"JSON value is not an int (was {self.kind})")
             )
         return self._int
 
     def as_float(self) raises -> Float64:
         if self.kind != "float" and self.kind != "int":
-            raise RequestException(
+            raise JSONDecodeError(
                 String(t"JSON value is not a float (was {self.kind})")
             )
         if self.kind == "int":
@@ -87,14 +87,14 @@ struct JSONValue(Copyable, Movable, Writable):
 
     def as_bool(self) raises -> Bool:
         if self.kind != "bool":
-            raise RequestException(
+            raise JSONDecodeError(
                 String(t"JSON value is not a bool (was {self.kind})")
             )
         return self._bool
 
     def __getitem__(self, key: String) raises -> JSONValue:
         if self.kind != "object":
-            raise RequestException(
+            raise JSONDecodeError(
                 String(t"JSON value is not an object (was {self.kind})")
             )
         return self._object[][key].copy()
@@ -108,11 +108,11 @@ struct JSONValue(Copyable, Movable, Writable):
 
     def __getitem__(self, index: Int) raises -> JSONValue:
         if self.kind != "array":
-            raise RequestException(
+            raise JSONDecodeError(
                 String(t"JSON value is not an array (was {self.kind})")
             )
         if index < 0 or index >= len(self._array[]):
-            raise RequestException(
+            raise JSONDecodeError(
                 String(t"JSON array index out of range: {index}")
             )
         return self._array[][index].copy()
@@ -147,14 +147,14 @@ struct JSONValue(Copyable, Movable, Writable):
 
 
 def parse_json(s: String) raises -> JSONValue:
-    """Parse a JSON document string into a JSONValue. Raises RequestException on malformed input.
+    """Parse a JSON document string into a JSONValue. Raises JSONDecodeError on malformed input.
     """
     var p = _Parser(s)
     p.skip_ws()
     var v = p.parse_value()
     p.skip_ws()
     if p.pos != p.n:
-        raise RequestException("trailing data after JSON value")
+        raise JSONDecodeError("trailing data after JSON value")
     return v^
 
 
@@ -185,7 +185,7 @@ struct _Parser:
     def parse_value(mut self) raises -> JSONValue:
         self.skip_ws()
         if self.pos >= self.n:
-            raise RequestException("unexpected end of JSON input")
+            raise JSONDecodeError("unexpected end of JSON input")
         var b = self.peek()
         if b == 0x7B:  # '{'
             return self._parse_object()
@@ -202,7 +202,7 @@ struct _Parser:
             return self._parse_number_or_null()
         if (b >= 0x30 and b <= 0x39) or b == 0x2B:  # digit or '+'
             return self._parse_number_or_null()
-        raise RequestException(
+        raise JSONDecodeError(
             String(
                 t"unexpected character in JSON:"
                 t" {Codepoint(unsafe_unchecked_codepoint=UInt32(b))}"
@@ -219,11 +219,11 @@ struct _Parser:
         while True:
             self.skip_ws()
             if self.peek() != 0x22:  # '"'
-                raise RequestException("expected string key in JSON object")
+                raise JSONDecodeError("expected string key in JSON object")
             var key = self._parse_string()
             self.skip_ws()
             if self.peek() != 0x3A:  # ':'
-                raise RequestException("expected ':' after key in JSON object")
+                raise JSONDecodeError("expected ':' after key in JSON object")
             self.pos += 1
             var val = self.parse_value()
             v._object[][key] = val^
@@ -233,7 +233,7 @@ struct _Parser:
                 self.pos += 1
                 break
             if b != 0x2C:  # ','
-                raise RequestException("expected ',' or '}' in JSON object")
+                raise JSONDecodeError("expected ',' or '}' in JSON object")
             self.pos += 1
         return v^
 
@@ -253,7 +253,7 @@ struct _Parser:
                 self.pos += 1
                 break
             if b != 0x2C:  # ','
-                raise RequestException("expected ',' or ']' in JSON array")
+                raise JSONDecodeError("expected ',' or ']' in JSON array")
             self.pos += 1
         return v^
 
@@ -269,7 +269,7 @@ struct _Parser:
             if b == 0x5C:  # backslash
                 self.pos += 1
                 if self.pos >= self.n:
-                    raise RequestException("unterminated escape in JSON string")
+                    raise JSONDecodeError("unterminated escape in JSON string")
                 var e = sp[self.pos]
                 self.pos += 1
                 if e == 0x22:
@@ -300,21 +300,21 @@ struct _Parser:
                     )
                 elif e == 0x75:  # 'u' — unicode escape \uXXXX
                     if self.pos + 4 > self.n:
-                        raise RequestException("bad \\uXXXX escape")
+                        raise JSONDecodeError("bad \\uXXXX escape")
                     var hex = String(self.src[byte = self.pos : self.pos + 4])
                     self.pos += 4
                     var cp = _parse_hex4(hex)
                     if cp == None:
-                        raise RequestException(String(t"bad \\u escape: {hex}"))
+                        raise JSONDecodeError(String(t"bad \\u escape: {hex}"))
                     out += String(
                         Codepoint(unsafe_unchecked_codepoint=UInt32(cp.value()))
                     )
                 else:
-                    raise RequestException("invalid escape in JSON string")
+                    raise JSONDecodeError("invalid escape in JSON string")
             else:
                 out += String(Codepoint(unsafe_unchecked_codepoint=UInt32(b)))
                 self.pos += 1
-        raise RequestException("unterminated JSON string")
+        raise JSONDecodeError("unterminated JSON string")
 
     def _parse_literal(mut self) raises -> JSONValue:
         var sp = self.src.unsafe_ptr()
@@ -343,7 +343,7 @@ struct _Parser:
             var v = JSONValue("bool")
             v._bool = False
             return v^
-        raise RequestException("invalid JSON literal (expected true/false)")
+        raise JSONDecodeError("invalid JSON literal (expected true/false)")
 
     def _parse_number_or_null(mut self) raises -> JSONValue:
         var sp = self.src.unsafe_ptr()
@@ -357,7 +357,7 @@ struct _Parser:
             ):
                 self.pos += 4
                 return JSONValue("null")
-            raise RequestException("invalid JSON literal (expected null)")
+            raise JSONDecodeError("invalid JSON literal (expected null)")
         # number
         var start = self.pos
         var is_float = False

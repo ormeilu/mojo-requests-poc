@@ -158,6 +158,78 @@ struct Response(Movable, Writable):
         self._stream_conn = None
         return chunks^
 
+    def iter_lines(mut self) raises -> List[String]:
+        """Split the body into lines (newline-delimited), like requests' iter_lines.
+
+        Drains the stream if streaming. Line terminators (``\\r``/``\\n``) are stripped.
+        A trailing empty line (body ending in a newline) is omitted.
+        """
+        var body = self.text()
+        var lines: List[String] = []
+        var cur = String()
+        for cp in body.codepoints():
+            var i = Int(cp)
+            if i == 10:  # \n — end of line
+                lines.append(cur)
+                cur = String()
+            elif i == 13:  # \r — skip (part of \r\n framing)
+                continue
+            else:
+                cur += String(Codepoint(unsafe_unchecked_codepoint=UInt32(i)))
+        if cur.byte_length() > 0:
+            lines.append(cur)
+        return lines^
+
+    def is_redirect(self) raises -> Bool:
+        """True if the response is a redirect that carries a ``Location`` header.
+        """
+        if not self.headers.contains("location"):
+            return False
+        var s = self.status_code
+        return s == 301 or s == 302 or s == 303 or s == 307 or s == 308
+
+    def is_permanent_redirect(self) raises -> Bool:
+        """True if the response is a permanent redirect (301 or 308) with a
+        ``Location`` header."""
+        if not self.headers.contains("location"):
+            return False
+        return self.status_code == 301 or self.status_code == 308
+
+    def links(self) raises -> Dict[String, String]:
+        """Parse the ``Link`` header into a ``rel -> url`` map (like ``r.links``).
+
+        Example ``Link`` value::
+
+            <https://api/next>; rel="next", <https://api/last>; rel="last"
+
+        Returns an empty Dict when no ``Link`` header is present.
+        """
+        var result: Dict[String, String] = {}
+        var raw = self.headers.get("link", "")
+        if raw.byte_length() == 0:
+            return result^
+        # Split on commas that separate link entries.
+        for entry in raw.split(","):
+            var url = String()
+            var rel = String()
+            for part in entry.split(";"):
+                var seg = String(part.strip())
+                if seg.startswith("<") and seg.endswith(">"):
+                    url = String(seg[byte = 1 : seg.byte_length() - 1])
+                elif seg.startswith("rel="):
+                    var val = String(seg[byte = 4 : seg.byte_length()])
+                    if val.startswith('"') and val.endswith('"'):
+                        val = String(val[byte = 1 : val.byte_length() - 1])
+                    rel = val
+            if rel.byte_length() > 0 and url.byte_length() > 0:
+                result[rel] = url
+        return result^
+
+    def close(mut self):
+        """Release the underlying connection for a streaming response (no-op otherwise).
+        """
+        self._stream_conn = None
+
     def _drain_stream(mut self) raises:
         """Read the entire streaming body into self.content (used by text()/content access).
         """

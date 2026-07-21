@@ -11,13 +11,20 @@ from .exceptions import (
     UnsupportedScheme,
     HTTPError,
     SSLError,
+    ConnectTimeout,
+    ReadTimeout,
+    JSONDecodeError,
+    TooManyRedirects,
+    URLRequired,
 )
 from .models import Response, Headers
 from .session import Session
 from ._tls import TLSConnection
 from ._cookies import CookieJar
+from .status_codes import StatusCodes, codes
 from .api import (
     request,
+    session,
     get,
     post,
     put,

@@ -14,7 +14,7 @@ from ._streaming import StreamingConn
 from ._pool import KeptAliveConn
 from ._net import ResolvedAddress
 from .models import Response, Headers
-from .exceptions import RequestException
+from .exceptions import RequestException, URLRequired, TooManyRedirects
 from std.memory import OwnedPointer
 from std.ffi import c_int, OwnedDLHandle
 
@@ -128,6 +128,9 @@ struct Session(Movable):
           (default), the trust store is resolved from $REQUESTS_CA_BUNDLE / $SSL_CERT_FILE /
           system defaults — see TLSConnection.connect.
         """
+        if url.byte_length() == 0:
+            raise URLRequired("no URL supplied for request")
+
         var current_url = url
         var redirect_method = method
         var current_data = data
@@ -200,7 +203,7 @@ struct Session(Movable):
                 eff_ca_bundle,
             )
 
-        raise RequestException("too many redirects (max 30)")
+        raise TooManyRedirects("exceeded 30 redirects")
 
     def _do_request(
         mut self,

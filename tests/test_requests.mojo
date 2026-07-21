@@ -11,7 +11,9 @@ from requests._dns import resolve
 from requests._http import build_request, parse_response
 from requests._json import parse_json
 from requests.exceptions import exception_kind
+from requests.status_codes import codes
 from requests.models import Response, Headers
+from requests.session import Session
 
 
 def _contains(haystack: String, needle: String) -> Bool:
@@ -325,9 +327,9 @@ def test_parse_bad_port_classifies_invalid_url() raises:
     )
 
 
-def test_malformed_json_classifies_request_exception() raises:
-    # RequestException is raised by the JSON parser on malformed input.
-    assert_equal(_classify_json_error("{not valid"), "RequestException")
+def test_malformed_json_classifies_json_decode_error() raises:
+    # JSONDecodeError is raised by the JSON parser on malformed input.
+    assert_equal(_classify_json_error("{not valid"), "JSONDecodeError")
 
 
 def test_raise_for_status_classifies_http_error() raises:
@@ -340,6 +342,23 @@ def test_raise_for_status_noop_under_400() raises:
     # raise_for_status is a no-op for 2xx/3xx.
     assert_equal(_classify_raise_for_status(200), "none")
     assert_equal(_classify_raise_for_status(301), "none")
+
+
+def test_empty_url_classifies_url_required() raises:
+    var s = Session()
+    try:
+        _ = s.get("")
+        assert_true(False)  # should have raised
+    except e:
+        assert_equal(exception_kind(e), "URLRequired")
+
+
+def test_status_codes_table() raises:
+    var c = codes()
+    assert_equal(c.ok, 200)
+    assert_equal(c.not_found, 404)
+    assert_equal(c.internal_server_error, 500)
+    assert_equal(c.get("too_many_requests"), 429)
 
 
 # --- runner (auto-discovers all test_* functions in this module) ---
