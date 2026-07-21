@@ -19,6 +19,12 @@ comptime SSL_CTRL_SET_TLSEXT_HOSTNAME: c_int = 55
 comptime TLSEXT_NAMETYPE_host_name: c_int = 0
 comptime SSL_ERROR_SSL: c_int = 1
 comptime SSL_ERROR_SYSCALL: c_int = 5
+comptime TLS1_2_VERSION: c_int = 0x0303
+comptime SSL_CTRL_SET_MIN_PROTO_VERSION: c_int = 123
+comptime TLS13_CIPHERSUITES: StaticString = (
+    "TLS_AES_128_GCM_SHA256:TLS_AES_256_GCM_SHA384:TLS_CHACHA20_POLY1305_SHA256"
+)
+comptime TLS12_CIPHER_LIST: StaticString = "ECDHE-ECDSA-AES128-GCM-SHA256:ECDHE-RSA-AES128-GCM-SHA256:ECDHE-ECDSA-CHACHA20-POLY1305:ECDHE-RSA-CHACHA20-POLY1305:ECDHE-ECDSA-AES256-GCM-SHA384:ECDHE-RSA-AES256-GCM-SHA384"
 
 
 struct TLSConnection:
@@ -89,6 +95,24 @@ struct TLSConnection:
         if Int(ctx) == 0:
             raise SSLError("SSL_CTX_new returned NULL")
         self._ctx = ctx
+
+        # Cipher/protocol curation: floor at TLS 1.2 (drops SSLv3/TLS1.0/1.1 downgrade
+        # exposure) and prefer modern AEAD suites for both 1.3 (curated via
+        # SSL_CTX_set_ciphersuites) and 1.2 (curated via SSL_CTX_set_cipher_list — the
+        # legacy API, since SSL_CTX_set_ciphersuites only governs TLS 1.3). Best-effort:
+        # an old libssl build may reject an unrecognized suite name, so failures here are
+        # ignored rather than raised — the handshake below still proceeds with defaults.
+        # SSL_CTX_set_min_proto_version is a macro -> SSL_CTX_ctrl(ctx, 123, version, NULL)
+        # (same pattern as SSL_set_tlsext_host_name above — not a real exported symbol).
+        _ = self._libssl.value()[].call["SSL_CTX_ctrl", c_int](
+            ctx, SSL_CTRL_SET_MIN_PROTO_VERSION, TLS1_2_VERSION, c_int(0)
+        )
+        _ = self._libssl.value()[].call["SSL_CTX_set_ciphersuites", c_int](
+            ctx, TLS13_CIPHERSUITES.unsafe_ptr()
+        )
+        _ = self._libssl.value()[].call["SSL_CTX_set_cipher_list", c_int](
+            ctx, TLS12_CIPHER_LIST.unsafe_ptr()
+        )
 
         if verify:
             # Resolve the CA trust store in priority order:
