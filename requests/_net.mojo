@@ -15,6 +15,9 @@ comptime SOCK_STREAM: c_int = 1
 comptime SOL_SOCKET: c_int = 0xFFFF
 comptime SO_RCVTIMEO: c_int = 0x1006
 comptime SO_SNDTIMEO: c_int = 0x1005
+# NOTE: AF_INET6 is intentionally NOT a comptime const here — its value differs by platform
+# (30 on macOS/BSD, 10 on Linux). The platform-correct value arrives in ResolvedAddress.pf
+# (sourced from getaddrinfo's ai_family in _dns.mojo), so _connect_addr reads addr.pf instead.
 
 # send/recv flags
 comptime SEND_FLAGS: c_int = 0
@@ -46,6 +49,24 @@ struct SockAddrIn:
 
 
 @fieldwise_init
+struct SockAddrIn6:
+    """libc ``struct sockaddr_in6`` (28 bytes — identical layout on macOS + Linux):
+
+    sa_family_t     sin6_family;    // u16
+    in_port_t       sin6_port;      // u16
+    uint32_t        sin6_flowinfo;  // u32
+    struct in6_addr sin6_addr;      // 16 bytes
+    uint32_t        sin6_scope_id;  // u32
+    """
+
+    var sin6_family: UInt16
+    var sin6_port: UInt16
+    var sin6_flowinfo: UInt32
+    var sin6_addr: SIMD[DType.uint8, 16]
+    var sin6_scope_id: UInt32
+
+
+@fieldwise_init
 struct Timeval:
     """libc ``struct timeval { long tv_sec; long tv_usec; }``."""
 
@@ -56,6 +77,35 @@ struct Timeval:
 def htons(port: UInt16) -> UInt16:
     """Host -> network byte order for a 16-bit port."""
     return (port << 8) | (port >> 8)
+
+
+def _do_connect(fd: c_int, addr: ResolvedAddress, port: Int) -> c_int:
+    """Build the right sockaddr for ``addr``'s family and call ``connect``.
+
+    - IPv4: ``sockaddr_in`` (16 bytes) with ``sin_family = AF_INET`` (portable: 2).
+    - IPv6: ``sockaddr_in6`` (28 bytes on macOS + Linux) with ``sin6_family = addr.pf`` — the
+      platform AF_INET6 value (30 macOS / 10 Linux), sourced from getaddrinfo's ai_family.
+
+    Returns the ``connect`` rc (0 = success, <0 = failure).
+    """
+    if addr.is_ipv4():
+        var sa = alloc[SockAddrIn](1)
+        sa[].sin_family = UInt16(AF_INET)
+        sa[].sin_port = htons(UInt16(port))
+        sa[].sin_addr = addr.ipv4
+        sa[].sin_zero = SIMD[DType.uint8, 8]()
+        var rc = external_call["connect", c_int](fd, sa, c_int(16))
+        sa.free()
+        return rc
+    var sa = alloc[SockAddrIn6](1)
+    sa[].sin6_family = UInt16(c_int(addr.pf))
+    sa[].sin6_port = htons(UInt16(port))
+    sa[].sin6_flowinfo = UInt32(0)
+    sa[].sin6_addr = addr.ipv6
+    sa[].sin6_scope_id = UInt32(0)
+    var rc = external_call["connect", c_int](fd, sa, c_int(28))
+    sa.free()
+    return rc
 
 
 struct TCPSocket:
@@ -86,8 +136,8 @@ struct TCPSocket:
     ) raises:
         """Open a TCP connection to ``host:port``.
 
-        ``host`` may be a dotted-decimal IP or a hostname (resolved via ``_dns``).
-        ``timeout`` (seconds) applies to this connect and subsequent send/recv.
+        ``host`` may be a dotted-decimal IPv4 literal, an IPv6 literal (``::1``), or a hostname
+        (resolved via ``_dns``). ``timeout`` (seconds) applies to this connect + send/recv.
         """
         var addr = _dns_resolve(host)
         self._connect_addr(addr, port, timeout, host)
@@ -98,18 +148,39 @@ struct TCPSocket:
         """Open a TCP connection to a pre-resolved IPv4 address (host byte order).
 
         Use this when DNS was already resolved by the caller (avoids re-resolution).
+        Kept for backward compatibility; new callers should prefer the
+        ``connect_ip(ResolvedAddress, …)`` overload, which carries both families.
+        """
+        self._connect_addr(
+            ResolvedAddress(Int8(4), Int8(2), addr, SIMD[DType.uint8, 16]()),
+            port,
+            timeout,
+            String(),
+        )
+
+    def connect_ip(
+        mut self,
+        addr: ResolvedAddress,
+        port: Int,
+        timeout: Optional[Float64] = None,
+    ) raises:
+        """Open a TCP connection to a pre-resolved ``ResolvedAddress`` (IPv4 or IPv6).
+
+        Use this when DNS was already resolved by the caller (avoids re-resolution).
         """
         self._connect_addr(addr, port, timeout, String())
 
     def _connect_addr(
         mut self,
-        addr: UInt32,
+        addr: ResolvedAddress,
         port: Int,
         timeout: Optional[Float64],
         host_label: String,
     ) raises:
+        # PF is the platform address-family integer (AF_INET=2 portable; AF_INET6 non-portable,
+        # sourced from getaddrinfo's ai_family via ResolvedAddress.pf).
         var raw_fd = external_call["socket", c_int](
-            AF_INET, SOCK_STREAM, c_int(0)
+            c_int(addr.pf), SOCK_STREAM, c_int(0)
         )
         if raw_fd < c_int(0):
             raise ConnectionError("socket() failed")
@@ -120,14 +191,12 @@ struct TCPSocket:
         if timeout != None:
             self._set_timeouts(timeout.value())
 
-        var sa = alloc[SockAddrIn](1)
-        sa[].sin_family = UInt16(AF_INET)
-        sa[].sin_port = htons(UInt16(port))
-        sa[].sin_addr = addr
-        sa[].sin_zero = SIMD[DType.uint8, 8]()
+        # connect() against the resolved address. The sockaddr layout + connect() addrlen differ
+        # by family (sockaddr_in = 16 bytes, sockaddr_in6 = 28 bytes on macOS + Linux); see
+        # _do_connect. pf is the platform address-family integer for IPv6 (AF_INET6 value varies
+        # by platform — sourced from getaddrinfo's ai_family via ResolvedAddress.pf).
+        var rc = _do_connect(self.fd, addr, port)
 
-        var rc = external_call["connect", c_int](self.fd, sa, c_int(16))
-        sa.free()
         if rc < c_int(0):
             # Query SO_ERROR *before* closing the fd (getsockopt needs a live socket).
             var was_timeout = self._is_timeout()
@@ -282,3 +351,4 @@ comptime CHUNK_SIZE = 8192
 # Re-export the resolver from _dns so callers only need _net. We import lazily here to avoid a
 # circular module reference at parse time; the helper just forwards.
 from ._dns import resolve as _dns_resolve
+from ._dns import ResolvedAddress
