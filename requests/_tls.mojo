@@ -9,6 +9,7 @@
 
 from std.ffi import OwnedDLHandle, c_int, external_call
 from std.memory import alloc, OwnedPointer
+from std.os import getenv
 from .exceptions import SSLError
 
 
@@ -142,9 +143,11 @@ struct TLSConnection:
             # whose backing memory lives for the duration of the SSL_CTX_load_verify_locations
             # call. Strings built char-by-char in _getenv can carry an internal representation
             # whose .unsafe_ptr() OpenSSL rejects; round-tripping through `String() + x`
-            # normalizes the layout. (Mojo String-build artifact observed in 1.0 beta.)
-            var env_rb = _getenv("REQUESTS_CA_BUNDLE")
-            var env_sc = _getenv("SSL_CERT_FILE")
+            # normalizes the layout. (Mojo String-build artifact observed in 1.0 beta — kept
+            # as a defensive no-op now that this reads via std.os.getenv rather than a
+            # hand-rolled libc FFI wrapper, see the removed `_getenv` note below.)
+            var env_rb = getenv("REQUESTS_CA_BUNDLE", "")
+            var env_sc = getenv("SSL_CERT_FILE", "")
             var have_path = False
             var resolved_path = String()
             if ca_bundle != None:
@@ -456,24 +459,6 @@ def _load_libssl() raises SSLError -> OwnedDLHandle:
             pass
 
     raise SSLError(String(t"could not find libssl. Tried: {tried}"))
-
-
-# --- env var access (libc getenv via FFI) ---------------------------------
-
-
-def _getenv(name: String) -> String:
-    """Read an environment variable via libc ``getenv``. Returns "" if unset."""
-    var ptr = external_call["getenv", UnsafePointer[UInt8, MutUntrackedOrigin]](
-        name.unsafe_ptr()
-    )
-    if Int(ptr) == 0:
-        return ""
-    var out = String()
-    var i = 0
-    while ptr[i] != 0:
-        out += String(Codepoint(unsafe_unchecked_codepoint=UInt32(ptr[i])))
-        i += 1
-    return out
 
 
 # --- error diagnostics ----------------------------------------------------

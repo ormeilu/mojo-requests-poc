@@ -34,7 +34,7 @@ fmt-check = "mojo format --quiet requests/ tests/ examples/ && git diff --exit-c
 server = "python tests/server.py"
 
 [dependencies]
-mojo = ">=1.0.0b3.dev2026071921,<2"
+mojo = ">=1.0.0b3.dev2026072114,<2"
 python = ">=3.14.6,<3.15"
 requests = ">=2.34.2,<3"
 httpx = ">=0.28.1,<0.29"

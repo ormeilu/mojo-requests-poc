@@ -576,12 +576,28 @@ Not pure Mojo bugs, but friction worth recording:
 
 - **`SSL_set_tlsext_host_name` is a macro** → must call `SSL_ctrl(ssl, 55, 0, hostname)`
   directly. Many servers refuse TLS without SNI. ([`_tls.mojo`](requests/_tls.mojo) ~L181)
+- **`SSL_CTX_set_min_proto_version` is *also* a macro**, not an exported symbol — same trap,
+  different function. Calling it via `.call["SSL_CTX_set_min_proto_version", c_int](...)`
+  crashes with `ABORT: symbol not found: SSL_CTX_set_min_proto_version` (a JIT hard-crash per
+  §1.3, not a compile error). It's `#define`d as `SSL_CTX_ctrl(ctx, SSL_CTRL_SET_MIN_PROTO_VERSION
+  /* 123 */, version, NULL)` — call `SSL_CTX_ctrl` directly with that control code.
+- **`SSL_CTX_set_session_cache_mode` is a macro too** — same family, control code `44`:
+  `SSL_CTX_ctrl(ctx, SSL_CTRL_SET_SESS_CACHE_MODE, mode, NULL)`. **Pattern:** any OpenSSL
+  "setter" whose name reads like a simple property accessor (`set_min_proto_version`,
+  `set_session_cache_mode`, `set_tlsext_host_name`, and by extension probably
+  `set_mode`/`set_options`/`set_max_proto_version`) is suspect — check the OpenSSL header before
+  assuming it's a real symbol `dlsym` can find; `nm -D libssl.so | grep SYMBOL` (or just trying
+  it and watching for the §1.3 JIT-crash signature) settles it fast.
 - **OpenSSL constants must be `comptime c_int`** to pass cleanly through `OwnedDLHandle.call`.
   Same pattern in `_net.mojo`, `_dns.mojo`, `_streaming.mojo`.
 - **Calls go through `self._libssl.value()[].call["SYMBOL", RetType](args...)`** and the handle
   must be stored as `OwnedPointer[OwnedDLHandle]` on the `TLSConnection` so it outlives the ctx.
 - **`_drain_openssl_errors` exists** because `external_call` failures are otherwise opaque —
   a bare `rc=0` tells you nothing. The helper reads `ERR_get_error` + `ERR_error_string_n`.
+
+**Where:** [`requests/_tls.mojo`](requests/_tls.mojo) — the cipher/protocol-curation and
+session-resumption blocks in `connect()` (both call `SSL_CTX_ctrl` directly, with a comment
+pointing at this entry).
 
 ---
 

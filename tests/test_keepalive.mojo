@@ -14,7 +14,7 @@
 # Run with: pixi run mojo -I . tests/test_keepalive.mojo
 
 from std.testing import assert_equal, assert_true, assert_false, TestSuite
-from std.ffi import external_call
+from std.os import getenv
 from requests.session import Session
 from requests._pool import (
     KeptAliveConn,
@@ -38,27 +38,19 @@ def _b(s: String) -> List[UInt8]:
     return o^
 
 
-def _getenv(name: String) -> String:
-    var ptr = external_call["getenv", UnsafePointer[UInt8, MutUntrackedOrigin]](
-        name.unsafe_ptr()
-    )
-    if Int(ptr) == 0:
-        return ""
-    var out = String()
-    var i = 0
-    while ptr[i] != 0:
-        out += String(Codepoint(unsafe_unchecked_codepoint=UInt32(ptr[i])))
-        i += 1
-    return out
+# NOTE: use std.os.getenv (not a hand-rolled external_call["getenv", ...]) — declaring our own
+# "getenv" FFI symbol here conflicts with the one requests/_tls.mojo already pulls in via
+# std.os.getenv, and `mojo build`/`mojo run` reject the program with "existing function with
+# conflicting signature" (see STRUGGLES.md §9). One declaration per process, stdlib's.
 
 
 def _http_base() -> String:
-    var v = _getenv("BASE_URL")
+    var v = getenv("BASE_URL", "")
     return v if v.byte_length() > 0 else "http://example.com"
 
 
 def _https_base() -> String:
-    var v = _getenv("HTTPS_BASE_URL")
+    var v = getenv("HTTPS_BASE_URL", "")
     return v if v.byte_length() > 0 else "https://example.com"
 
 

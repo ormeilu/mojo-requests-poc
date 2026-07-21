@@ -11,7 +11,7 @@
 #   (for the live tests: start `pixi run server` and export BASE_URL / HTTPS_BASE_URL / PROXY_URL)
 
 from std.testing import assert_equal, assert_true, assert_false, TestSuite
-from std.ffi import external_call
+from std.os import getenv
 from requests.session import Session
 from requests._url import parse_url
 from requests._http import build_request
@@ -34,18 +34,12 @@ def _b(s: String) -> List[UInt8]:
     return o^
 
 
+# NOTE: use std.os.getenv (not a hand-rolled external_call["getenv", ...]) — declaring our own
+# "getenv" FFI symbol here conflicts with the one requests/_tls.mojo already pulls in via
+# std.os.getenv, and `mojo build`/`mojo run` reject the program with "existing function with
+# conflicting signature" (see STRUGGLES.md §9). One declaration per process, stdlib's.
 def _getenv(name: String) -> String:
-    var ptr = external_call["getenv", UnsafePointer[UInt8, MutUntrackedOrigin]](
-        name.unsafe_ptr()
-    )
-    if Int(ptr) == 0:
-        return ""
-    var out = String()
-    var i = 0
-    while ptr[i] != 0:
-        out += String(Codepoint(unsafe_unchecked_codepoint=UInt32(ptr[i])))
-        i += 1
-    return out
+    return getenv(name, "")
 
 
 def _proxies(scheme: String, url: String) -> Dict[String, String]:

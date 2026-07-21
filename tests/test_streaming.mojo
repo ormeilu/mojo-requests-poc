@@ -13,7 +13,8 @@
 
 from std.testing import assert_equal, assert_true, assert_false, TestSuite
 from std.memory import OwnedPointer
-from std.ffi import c_int, OwnedDLHandle, external_call
+from std.ffi import c_int, OwnedDLHandle
+from std.os import getenv
 from requests.session import Session
 from requests.models import Response, Headers
 from requests._streaming import StreamingConn
@@ -36,30 +37,21 @@ def _byte(c: String) -> UInt8:
     return UInt8(c.unsafe_ptr()[0])
 
 
-def _getenv(name: String) -> String:
-    """Read an environment variable via libc getenv (returns "" if unset)."""
-    var ptr = external_call["getenv", UnsafePointer[UInt8, MutUntrackedOrigin]](
-        name.unsafe_ptr()
-    )
-    if Int(ptr) == 0:
-        return ""
-    var out = String()
-    var i = 0
-    while ptr[i] != 0:
-        out += String(Codepoint(unsafe_unchecked_codepoint=UInt32(ptr[i])))
-        i += 1
-    return out
+# NOTE: use std.os.getenv (not a hand-rolled external_call["getenv", ...]) — declaring our own
+# "getenv" FFI symbol here conflicts with the one requests/_tls.mojo already pulls in via
+# std.os.getenv, and `mojo build`/`mojo run` reject the program with "existing function with
+# conflicting signature" (see STRUGGLES.md §9). One declaration per process, stdlib's.
 
 
 def _http_base() -> String:
-    var v = _getenv("BASE_URL")
+    var v = getenv("BASE_URL", "")
     if v.byte_length() > 0:
         return v
     return "http://example.com"
 
 
 def _https_base() -> String:
-    var v = _getenv("HTTPS_BASE_URL")
+    var v = getenv("HTTPS_BASE_URL", "")
     if v.byte_length() > 0:
         return v
     return "https://example.com"
