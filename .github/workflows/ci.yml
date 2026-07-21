@@ -72,6 +72,7 @@ jobs:
           cat /tmp/server.log
           grep "^BASE_URL="       /tmp/server.log >> "$GITHUB_ENV"
           grep "^HTTPS_BASE_URL=" /tmp/server.log >> "$GITHUB_ENV"
+          grep "^PROXY_URL="      /tmp/server.log >> "$GITHUB_ENV"
           echo "SSL_CERT_FILE=$(grep '^ROOT=' /tmp/server.log | cut -d= -f2)/cert.pem" >> "$GITHUB_ENV"
 
       - name: Core tests (URL parsing, framing, JSON)
@@ -85,6 +86,9 @@ jobs:
 
       - name: Keep-alive / connection-pool tests (local server)
         run: pixi run test-keepalive
+
+      - name: Proxy tests (local forward proxy)
+        run: pixi run test-proxy
 
       - name: Stop local test server
         if: always()

@@ -29,6 +29,7 @@ requests/        the library (import path is `requests`, sources compiled with `
   _tls.mojo      TLSConnection: OpenSSL TLS layer (dlopen'd, SNI + cert verification)
   _streaming.mojo StreamingConn — owns the live socket/TLS for `stream=True`
   _pool.mojo     KeptAliveConn — owns a reusable live socket/TLS for keep-alive; framed reads
+  _proxy.mojo    proxy selection + CONNECT tunneling (select_proxy / tunnel_connect)
   _json.mojo     minimal recursive-descent JSON parser (no std.json in Mojo 1.0)
   _cookies.mojo  CookieJar (Session-scoped)
   exceptions.mojo error constructors + exception_kind() classifier
@@ -48,6 +49,7 @@ pixi run test              # core HTTP / URL / JSON tests
 pixi run test-https        # HTTPS tests
 pixi run test-streaming    # stream=True + iter_content (reads BASE_URL / HTTPS_BASE_URL / SSL_CERT_FILE from env)
 pixi run test-keepalive    # connection pooling / keep-alive (framing-helper unit tests + live reuse; needs HTTP/1.1 server)
+pixi run test-proxy        # proxy support (selection/absolute-form/CONNECT unit tests + live HTTP-forward & HTTPS-tunnel via server.py; reads PROXY_URL / BASE_URL / HTTPS_BASE_URL)
 pixi run test-all          # all three suites
 pixi run demo              # examples/demo.mojo
 pixi run bench             # benchmark/run.sh (hyperfine)
@@ -83,6 +85,25 @@ Tests read live targets from env (`BASE_URL`, `HTTPS_BASE_URL`, `SSL_CERT_FILE`)
 - The library's default one-shot path sends `Connection: close` and reads to EOF; keep-alive flips this via `build_request(..., keep_alive=True)` + **framed reads** (`KeptAliveConn.recv_framed` reads exactly Content-Length / dechunked-terminator bytes so the socket is left at the next response). **Never read-to-EOF on a keep-alive socket — the server never closes, so it deadlocks.**
 - `KeptAliveConn` mirrors `StreamingConn`'s ownership model (owns fd + SSL* + libssl handle; Movable + `_disown`/`close`); the live parts are stolen from the throwaway `TCPSocket`/`TLSConnection` via `fd_value()` / `_steal_ssl()` / `_steal_libssl()`.
 - Streaming (`stream=True`) is **never pooled** — it hands its live connection to the `Response`.
+
+## Proxy support
+
+- `proxies` map (`{"http"/"https"/"all": "http://proxyhost:port"}`) threads per-call
+  (`request(..., proxies=...)`, overrides the Session default) → `Session.proxies` field. Only
+  **http proxies** are supported; an https proxy URL raises `ProxyError`.
+- `select_proxy(proxies, scheme)` (`_proxy.mojo`) picks the proxy for the target scheme (exact
+  key, then `all`). When a proxy applies, DNS resolves the **proxy** host, not the target.
+- **http target → http proxy**: absolute-form request line (`GET http://host/path HTTP/1.1`) via
+  `build_request(..., absolute_target=True)`. **https target → http proxy**: `tunnel_connect`
+  sends `CONNECT host:port`, requires a 2xx, then `TLSConnection.connect(fd, target_host, ...)`
+  runs the handshake end-to-end over the tunnel (SNI + cert verification against the *target*).
+- Proxied requests **bypass the keep-alive pool** — `Session._exchange` short-circuits to
+  `_connect_proxied` (a fresh, un-pooled `KeptAliveConn` used once and closed). Streaming has its
+  own proxied branch in `_do_request`.
+- **Deferred**: proxy auth / userinfo (`http://user:pass@proxy`), https proxies (TLS to the proxy),
+  pooling proxied connections, and `*_PROXY`/`NO_PROXY` env vars.
+- Live-tested via the forward proxy in `tests/server.py` (`PROXY_URL`) + `tests/test_proxy.mojo`
+  (`pixi run test-proxy`).
 
 ## TLS / OpenSSL conventions
 

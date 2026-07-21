@@ -21,6 +21,7 @@ def build_request(
     imm headers: Dict[String, String],
     body: String,
     keep_alive: Bool = False,
+    absolute_target: Bool = False,
 ) -> String:
     """Assemble the HTTP/1.1 request wire format.
 
@@ -31,6 +32,10 @@ def build_request(
       chunked — rather than to EOF), otherwise ``close`` (the server closes after responding,
       the simplest reliable read-to-EOF). An explicit caller-supplied ``Connection`` header
       always wins.
+    - ``absolute_target``: when True, use the absolute-form request target
+      (``GET http://host/path HTTP/1.1``) required when talking to an HTTP proxy for an
+      ``http://`` target (RFC 7230 §5.3.2). Origin-form (path only) otherwise. HTTPS-via-proxy
+      uses a CONNECT tunnel and stays origin-form, so this flag is only set for http targets.
     """
     var h = headers.copy()
     if not _has_key_ci(h, "Host"):
@@ -40,8 +45,12 @@ def build_request(
     if not _has_key_ci(h, "Connection"):
         h["Connection"] = "keep-alive" if keep_alive else "close"
 
+    var target = url.request_target()
+    if absolute_target:
+        target = url.origin() + url.request_target()
+
     var lines: List[String] = []
-    lines.append(method + " " + url.request_target() + " HTTP/1.1")
+    lines.append(method + " " + target + " HTTP/1.1")
     for entry in h.items():
         lines.append(entry.key + ": " + entry.value)
     var head = CRLF.join(lines) + HEADER_TERMINATOR

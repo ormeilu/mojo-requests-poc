@@ -16,6 +16,7 @@ from .exceptions import (
     JSONDecodeError,
     TooManyRedirects,
     URLRequired,
+    ProxyError,
 )
 from .models import Response, Headers
 from .session import Session

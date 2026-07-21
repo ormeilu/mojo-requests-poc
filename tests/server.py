@@ -136,10 +136,92 @@ def _make_https_handler(certfile: str) -> type:
     return Handler
 
 
+def _make_proxy_handler() -> type:
+    """A minimal forward proxy: absolute-form GET forwarding + CONNECT tunneling.
+
+    Exercises the client's proxy support (tests/test_proxy.mojo):
+      - ``GET http://host/path`` → the proxy fetches the origin and relays the response.
+      - ``CONNECT host:port`` → the proxy opens a raw tunnel and pumps bytes both ways, so the
+        client runs its TLS handshake end-to-end with the target.
+    """
+    import http.client
+    import select
+    import socket as _socket
+    from http.server import BaseHTTPRequestHandler
+    from urllib.parse import urlsplit
+
+    class ProxyHandler(BaseHTTPRequestHandler):
+        protocol_version = "HTTP/1.1"
+
+        def log_message(self, fmt, *args):  # noqa: A003
+            pass
+
+        def do_GET(self):  # noqa: N802
+            parts = urlsplit(self.path)
+            if not parts.hostname:
+                self.send_error(400, "proxy requires absolute-form target")
+                return
+            selector = parts.path or "/"
+            if parts.query:
+                selector += "?" + parts.query
+            try:
+                conn = http.client.HTTPConnection(
+                    parts.hostname, parts.port or 80, timeout=10
+                )
+                conn.request("GET", selector)
+                resp = conn.getresponse()
+                body = resp.read()
+            except OSError as exc:
+                self.send_error(502, f"proxy upstream error: {exc}")
+                return
+            self.send_response(resp.status)
+            for key, val in resp.getheaders():
+                if key.lower() in ("transfer-encoding", "connection", "content-length"):
+                    continue
+                self.send_header(key, val)
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
+        def do_CONNECT(self):  # noqa: N802
+            host, _, port_s = self.path.partition(":")
+            try:
+                upstream = _socket.create_connection(
+                    (host, int(port_s or 443)), timeout=10
+                )
+            except OSError as exc:
+                self.send_error(502, f"CONNECT failed: {exc}")
+                return
+            self.send_response(200, "Connection established")
+            self.end_headers()
+            client = self.connection
+            client.setblocking(False)
+            upstream.setblocking(False)
+            socks = [client, upstream]
+            try:
+                while True:
+                    readable, _, errored = select.select(socks, [], socks, 30)
+                    if errored:
+                        break
+                    for s in readable:
+                        other = upstream if s is client else client
+                        data = s.recv(65536)
+                        if not data:
+                            return
+                        other.sendall(data)
+            except OSError:
+                pass
+            finally:
+                upstream.close()
+
+    return ProxyHandler
+
+
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--http-port", type=int, default=18090)
     parser.add_argument("--https-port", type=int, default=18091)
+    parser.add_argument("--proxy-port", type=int, default=18092)
     parser.add_argument(
         "--root", type=str, default=None, help="directory to serve (default: temp)"
     )
@@ -161,9 +243,14 @@ def main() -> int:
     ctx.load_cert_chain(certfile=str(cert_path), keyfile=str(key_path))
     httpsd.socket = ctx.wrap_socket(httpsd.socket, server_side=True)
 
+    # Forward proxy (absolute-form GET forwarding + CONNECT tunneling).
+    proxy_handler = _make_proxy_handler()
+    proxyd = ThreadingHTTPServer(("127.0.0.1", args.proxy_port), proxy_handler)
+
     threads = [
         threading.Thread(target=httpd.serve_forever, daemon=True),
         threading.Thread(target=httpsd.serve_forever, daemon=True),
+        threading.Thread(target=proxyd.serve_forever, daemon=True),
     ]
     for t in threads:
         t.start()
@@ -171,8 +258,10 @@ def main() -> int:
     # Announce.
     print(f"HTTP_PORT={args.http_port}")
     print(f"HTTPS_PORT={args.https_port}")
+    print(f"PROXY_PORT={args.proxy_port}")
     print(f"BASE_URL=http://127.0.0.1:{args.http_port}")
     print(f"HTTPS_BASE_URL=https://127.0.0.1:{args.https_port}")
+    print(f"PROXY_URL=http://127.0.0.1:{args.proxy_port}")
     print(f"ROOT={root}")
     sys.stdout.flush()
 
@@ -187,6 +276,7 @@ def main() -> int:
     stop.wait()
     httpd.shutdown()
     httpsd.shutdown()
+    proxyd.shutdown()
     return 0
 
 

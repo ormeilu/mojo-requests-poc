@@ -13,6 +13,8 @@ from ._cookies import CookieJar
 from ._streaming import StreamingConn
 from ._pool import KeptAliveConn
 from ._net import ResolvedAddress
+from ._url import URL
+from ._proxy import select_proxy, tunnel_connect
 from .models import Response, Headers
 from .exceptions import RequestException, URLRequired, TooManyRedirects
 from std.memory import OwnedPointer
@@ -43,6 +45,7 @@ struct Session(Movable):
     var cookies: CookieJar
     var verify: Bool
     var ca_bundle: Optional[String]
+    var proxies: Dict[String, String]
     var _pool: List[KeptAliveConn]
 
     def __init__(out self):
@@ -54,6 +57,9 @@ struct Session(Movable):
         # and per-Session via the verify/ca_bundle parameters).
         self.verify = True
         self.ca_bundle = None
+        # Proxy defaults: none. Populated by the caller ({"http"/"https"/"all": "http://.."})
+        # or overridden per-call via the request() proxies parameter.
+        self.proxies = {}
         self._pool = []
         # Warm up the DNS resolver: the first getaddrinfo call in a process can fail on some
         # systems (lazy resolver init). Doing a throwaway resolve here primes it for real use.
@@ -71,6 +77,7 @@ struct Session(Movable):
         self.cookies = existing.cookies^
         self.verify = existing.verify
         self.ca_bundle = existing.ca_bundle^
+        self.proxies = existing.proxies^
         self._pool = existing._pool^
 
     def __del__(deinit self):
@@ -111,6 +118,7 @@ struct Session(Movable):
         stream: Bool = False,
         verify: Optional[Bool] = None,
         ca_bundle: Optional[String] = None,
+        proxies: Optional[Dict[String, String]] = None,
     ) raises -> Response:
         """Issue an HTTP request and return a Response.
 
@@ -127,6 +135,10 @@ struct Session(Movable):
         - ``ca_bundle``: override the Session-level CA bundle path for this call. When None
           (default), the trust store is resolved from $REQUESTS_CA_BUNDLE / $SSL_CERT_FILE /
           system defaults — see TLSConnection.connect.
+        - ``proxies``: per-call proxy map ({"http"/"https"/"all": "http://proxyhost:port"}),
+          overriding the Session-level ``proxies``. HTTP targets are sent to the proxy in
+          absolute form; HTTPS targets are tunneled via CONNECT. Only http proxies are
+          supported (proxy auth / https proxies are not yet implemented).
         """
         if url.byte_length() == 0:
             raise URLRequired("no URL supplied for request")
@@ -144,6 +156,11 @@ struct Session(Movable):
         if eff_ca_bundle == None:
             eff_ca_bundle = self.ca_bundle
 
+        # Resolve effective proxies: a per-call map fully overrides the Session default.
+        var eff_proxies = self.proxies.copy()
+        if proxies != None:
+            eff_proxies = proxies.value().copy()
+
         # First request: consumes params (owned). Subsequent redirects pass None for params.
         var resp = self._do_request(
             redirect_method,
@@ -156,6 +173,7 @@ struct Session(Movable):
             stream,
             eff_verify,
             eff_ca_bundle,
+            eff_proxies,
         )
 
         comptime MAX_REDIRECTS = 30
@@ -201,6 +219,7 @@ struct Session(Movable):
                 False,
                 eff_verify,
                 eff_ca_bundle,
+                eff_proxies,
             )
 
         raise TooManyRedirects("exceeded 30 redirects")
@@ -217,21 +236,35 @@ struct Session(Movable):
         stream: Bool,
         verify: Bool,
         ca_bundle: Optional[String],
+        proxies: Dict[String, String],
     ) raises -> Response:
         """Perform a single HTTP request (no redirect following).
 
         When ``stream`` is True, the connection stays open and the Response carries a live
         StreamingConn for lazy body reads via iter_content().
+
+        When a proxy applies to the target scheme (``proxies``), the request is routed through
+        it: http targets in absolute form, https targets via a CONNECT tunnel. Proxied
+        connections are never pooled.
         """
         # Resolve URL + query params.
         var u = parse_url(url)
 
-        # Resolve DNS NOW (before header Dict allocations) to avoid a heap-state-dependent
-        # getaddrinfo failure observed in Mojo 1.0 beta. The IP is passed directly to connect.
         var host = u.host
         var scheme = u.scheme
         var port = u.port
-        var ip = _dns_resolve(host)
+
+        # Select the proxy (if any) for this target scheme. When proxying, we connect to the
+        # proxy host — so DNS-resolve the proxy, not the target. Otherwise resolve the target.
+        var proxy = select_proxy(proxies, scheme)
+        var proxied = proxy != None
+        # Resolve DNS NOW (before header Dict allocations) to avoid a heap-state-dependent
+        # getaddrinfo failure observed in Mojo 1.0 beta. The IP is passed directly to connect.
+        var ip: ResolvedAddress
+        if proxied:
+            ip = _dns_resolve(proxy.value().host)
+        else:
+            ip = _dns_resolve(host)
 
         if params != None:
             var extra = build_query_string(params.value())
@@ -268,8 +301,16 @@ struct Session(Movable):
         # pooled non-streaming path reads a framed body and reuses the socket (Connection:
         # keep-alive).
         var is_https = scheme == "https"
+        # An http target through an http proxy needs an absolute-form request target; an https
+        # target is CONNECT-tunneled and stays origin-form.
+        var abs_target = proxied and not is_https
         var req_str = build_request(
-            method, u, merged, body, keep_alive=not stream
+            method,
+            u,
+            merged,
+            body,
+            keep_alive=not stream,
+            absolute_target=abs_target,
         )
 
         # Compute the final URL.
@@ -284,9 +325,15 @@ struct Session(Movable):
             # `raises SSLError` call (tls.*) cannot coexist with a bare `raises` call (sock.*).
             var sock = TCPSocket()
             var tls = TLSConnection()
+            # When proxied, connect to the proxy (ip = proxy's address). For https, open a
+            # CONNECT tunnel to the target before the TLS handshake; for http, the absolute-form
+            # request is forwarded by the proxy.
+            var connect_port = proxy.value().port if proxied else port
             if is_https:
                 try:
-                    sock.connect_ip(ip, port, timeout)
+                    sock.connect_ip(ip, connect_port, timeout)
+                    if proxied:
+                        tunnel_connect(sock, host, port, u.is_ipv6_literal())
                     tls.connect(sock.fd_value(), host, verify, ca_bundle)
                     tls.send_all(req_str)
                 except e:
@@ -295,14 +342,15 @@ struct Session(Movable):
                     raise e^
             else:
                 try:
-                    sock.connect_ip(ip, port, timeout)
+                    sock.connect_ip(ip, connect_port, timeout)
                     sock.send_all(req_str)
                 except e:
                     sock.close()
                     raise e^
             return self._stream_response(sock^, tls^, is_https, host, final_url)
 
-        # Non-streaming: exchange over a pooled (or fresh) keep-alive connection.
+        # Non-streaming: exchange over a pooled (or fresh) keep-alive connection. Proxied
+        # requests bypass the pool entirely (a fresh proxy connection per request).
         var raw = self._exchange(
             method,
             req_str,
@@ -314,6 +362,7 @@ struct Session(Movable):
             verify,
             ca_bundle,
             is_https,
+            proxy^,
         )
         if len(raw) == 0:
             raise RequestException("empty response from server")
@@ -336,6 +385,7 @@ struct Session(Movable):
         verify: Bool,
         ca_bundle: Optional[String],
         is_https: Bool,
+        var proxy: Optional[URL],
     ) raises -> List[UInt8]:
         """Send ``req_str`` and read one framed response, reusing a pooled connection when possible.
 
@@ -343,9 +393,30 @@ struct Session(Movable):
         keep-alive socket the server already dropped), it is closed and the request is retried
         once on a fresh connection. A connection that yields a self-delimiting, non-``close``
         response is returned to the pool; otherwise it is closed.
+
+        Proxied requests (``proxy`` set) bypass the pool: a fresh proxy connection is opened,
+        used once, and closed — pooling by proxy endpoint is future work.
         """
         var reusable = False
         var raw = List[UInt8]()
+
+        # Proxied: fresh, un-pooled connection through the proxy.
+        if proxy != None:
+            var pconn = self._connect_proxied(
+                scheme,
+                host,
+                port,
+                ip,
+                timeout,
+                verify,
+                ca_bundle,
+                is_https,
+                proxy.value(),
+            )
+            pconn.send_all(req_str)
+            raw = pconn.recv_framed(method, reusable)
+            pconn.close()
+            return raw^
 
         # Attempt reuse.
         var idx = self._pool_find(scheme, host, port)
@@ -414,6 +485,61 @@ struct Session(Movable):
         else:
             try:
                 sock.connect_ip(ip, port, timeout)
+            except e:
+                sock.close()
+                raise e^
+            var fd = sock.fd_value()
+            sock._disown()
+            var no_handle: Optional[OwnedPointer[OwnedDLHandle]] = None
+            var no_ssl: Optional[
+                UnsafePointer[UInt8, MutUntrackedOrigin]
+            ] = None
+            return KeptAliveConn(
+                scheme, host, port, fd, False, no_handle^, no_ssl^
+            )
+
+    def _connect_proxied(
+        mut self,
+        scheme: String,
+        host: String,
+        port: Int,
+        ip: ResolvedAddress,
+        timeout: Optional[Float64],
+        verify: Bool,
+        ca_bundle: Optional[String],
+        is_https: Bool,
+        proxy: URL,
+    ) raises -> KeptAliveConn:
+        """Open a fresh connection to ``host:port`` *through* ``proxy`` and hand back a
+        KeptAliveConn (never pooled — closed after one exchange).
+
+        ``ip`` is the proxy's resolved address (the caller DNS-resolves the proxy host, not the
+        target). For https the CONNECT tunnel is opened before the TLS handshake, which runs
+        against the *target* host (SNI + cert verification). Split per scheme for the same
+        typed-``raises`` reason as ``_connect_new``."""
+        var sock = TCPSocket()
+        var tls = TLSConnection()
+        var target_is_ipv6 = _find(host, ":") >= 0
+        if is_https:
+            try:
+                sock.connect_ip(ip, proxy.port, timeout)
+                tunnel_connect(sock, host, port, target_is_ipv6)
+                tls.connect(sock.fd_value(), host, verify, ca_bundle)
+            except e:
+                tls.close()
+                sock.close()
+                raise e^
+            var fd = sock.fd_value()
+            var ssl_ptr = tls._steal_ssl()
+            var handle = tls._steal_libssl()
+            sock._disown()
+            tls._disown()
+            return KeptAliveConn(
+                scheme, host, port, fd, True, handle^, ssl_ptr^
+            )
+        else:
+            try:
+                sock.connect_ip(ip, proxy.port, timeout)
             except e:
                 sock.close()
                 raise e^
@@ -521,6 +647,7 @@ struct Session(Movable):
         stream: Bool = False,
         verify: Optional[Bool] = None,
         ca_bundle: Optional[String] = None,
+        proxies: Optional[Dict[String, String]] = None,
     ) raises -> Response:
         return self.request(
             "GET",
@@ -532,6 +659,7 @@ struct Session(Movable):
             stream=stream,
             verify=verify,
             ca_bundle=ca_bundle,
+            proxies=proxies,
         )
 
     def post(
@@ -544,6 +672,7 @@ struct Session(Movable):
         allow_redirects: Bool = True,
         verify: Optional[Bool] = None,
         ca_bundle: Optional[String] = None,
+        proxies: Optional[Dict[String, String]] = None,
     ) raises -> Response:
         return self.request(
             "POST",
@@ -555,6 +684,7 @@ struct Session(Movable):
             allow_redirects=allow_redirects,
             verify=verify,
             ca_bundle=ca_bundle,
+            proxies=proxies,
         )
 
     def put(
@@ -567,6 +697,7 @@ struct Session(Movable):
         allow_redirects: Bool = True,
         verify: Optional[Bool] = None,
         ca_bundle: Optional[String] = None,
+        proxies: Optional[Dict[String, String]] = None,
     ) raises -> Response:
         return self.request(
             "PUT",
@@ -578,6 +709,7 @@ struct Session(Movable):
             allow_redirects=allow_redirects,
             verify=verify,
             ca_bundle=ca_bundle,
+            proxies=proxies,
         )
 
     def patch(
@@ -590,6 +722,7 @@ struct Session(Movable):
         allow_redirects: Bool = True,
         verify: Optional[Bool] = None,
         ca_bundle: Optional[String] = None,
+        proxies: Optional[Dict[String, String]] = None,
     ) raises -> Response:
         return self.request(
             "PATCH",
@@ -601,6 +734,7 @@ struct Session(Movable):
             allow_redirects=allow_redirects,
             verify=verify,
             ca_bundle=ca_bundle,
+            proxies=proxies,
         )
 
     def delete(
@@ -611,6 +745,7 @@ struct Session(Movable):
         allow_redirects: Bool = True,
         verify: Optional[Bool] = None,
         ca_bundle: Optional[String] = None,
+        proxies: Optional[Dict[String, String]] = None,
     ) raises -> Response:
         return self.request(
             "DELETE",
@@ -620,6 +755,7 @@ struct Session(Movable):
             allow_redirects=allow_redirects,
             verify=verify,
             ca_bundle=ca_bundle,
+            proxies=proxies,
         )
 
     def head(
@@ -630,6 +766,7 @@ struct Session(Movable):
         allow_redirects: Bool = True,
         verify: Optional[Bool] = None,
         ca_bundle: Optional[String] = None,
+        proxies: Optional[Dict[String, String]] = None,
     ) raises -> Response:
         return self.request(
             "HEAD",
@@ -639,6 +776,7 @@ struct Session(Movable):
             allow_redirects=allow_redirects,
             verify=verify,
             ca_bundle=ca_bundle,
+            proxies=proxies,
         )
 
     def options(
@@ -649,6 +787,7 @@ struct Session(Movable):
         allow_redirects: Bool = True,
         verify: Optional[Bool] = None,
         ca_bundle: Optional[String] = None,
+        proxies: Optional[Dict[String, String]] = None,
     ) raises -> Response:
         return self.request(
             "OPTIONS",
@@ -658,6 +797,7 @@ struct Session(Movable):
             allow_redirects=allow_redirects,
             verify=verify,
             ca_bundle=ca_bundle,
+            proxies=proxies,
         )
 
 

@@ -39,6 +39,7 @@ comptime READ_TIMEOUT_PREFIX = "ReadTimeout"
 comptime JSON_DECODE_PREFIX = "JSONDecodeError"
 comptime TOO_MANY_REDIRECTS_PREFIX = "TooManyRedirects"
 comptime URL_REQUIRED_PREFIX = "URLRequired"
+comptime PROXY_PREFIX = "ProxyError"
 
 
 # --- Structs --------------------------------------------------------------
@@ -257,6 +258,30 @@ struct URLRequired(Movable, Writable):
         writer.write(URL_REQUIRED_PREFIX, ": ", self.msg)
 
 
+struct ProxyError(Movable, Writable):
+    """A proxy-level error (bad proxy URL, CONNECT tunnel refused, unsupported proxy scheme).
+
+    Mirrors Python's ``requests.exceptions.ProxyError``. ``host`` is the *target* host being
+    tunneled to (optional context), folded into the message only when set so the prefix stays
+    stable for classification.
+    """
+
+    var msg: String
+    var host: String
+
+    def __init__(out self, msg: String, *, host: String = ""):
+        self.msg = msg
+        self.host = host
+
+    def write_to(self, mut writer: Some[Writer]):
+        if self.host.byte_length() > 0:
+            writer.write(
+                PROXY_PREFIX, ": ", self.msg, " (host=", self.host, ")"
+            )
+        else:
+            writer.write(PROXY_PREFIX, ": ", self.msg)
+
+
 # --- Classification --------------------------------------------------------
 
 
@@ -283,6 +308,8 @@ def exception_kind(err: Error) -> String:
         return TOO_MANY_REDIRECTS_PREFIX
     if _starts_with(s, URL_REQUIRED_PREFIX):
         return URL_REQUIRED_PREFIX
+    if _starts_with(s, PROXY_PREFIX):
+        return PROXY_PREFIX
     if _starts_with(s, CONNECTION_PREFIX):
         return CONNECTION_PREFIX
     if _starts_with(s, TIMEOUT_PREFIX):

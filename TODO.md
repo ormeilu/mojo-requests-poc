@@ -68,7 +68,23 @@ the hyperfine comparison.
   - **TLS session resumption** (highest payoff). **Now unblocked** — keep-alive has landed (`_pool.mojo`). Enable `SSL_CTX_set_session_cache_mode(ctx, SSL_SESS_CACHE_CLIENT)` + ticket support so repeat handshakes to the same host skip the asymmetric key exchange even when the pooled connection was dropped and must be re-established. Needs a per-Session (host → `SSL_SESSION*`) cache and `SSL_set_session()` on the client side. Note: while a `KeptAliveConn` stays pooled, the handshake is skipped entirely (the socket is reused); resumption additionally helps the *re-connect* case (stale-pool retry, or a new endpoint after eviction).
   - **Cipher/protocol curation.** Force TLS 1.3 (`SSL_CTX_set_min_proto_version(TLS1_3_VERSION)`) when available and prefer ECDSA/X25519 + AES-GCM/ChaCha20-Poly1305 via `SSL_CTX_set_ciphersuites()`. Saves 1-RTT (TLS 1.3 vs 1.2) and dramatically speeds up the handshake.
   - **Hardware acceleration** — mostly *not* our job: mojo-requests `dlopen`s whatever system OpenSSL it finds, so AES-NI/NEON/QAT availability depends on how *that* build was compiled. Could add a diagnostic that logs `OPENSSL_INFO_AVAILABLE_ENGINES` / checks for the `aesni` engine at startup, but the real lever is the system OpenSSL build, not our code.
-- [ ] **Proxy support** — `proxies` parameter (HTTP/HTTPS proxy tunneling).
+- [x] **Proxy support** — `proxies` parameter ({"http"/"https"/"all": "http://proxyhost:port"}),
+  per-call (overrides the Session-level `proxies` field) or per-Session. Implemented in
+  [`requests/_proxy.mojo`](requests/_proxy.mojo) + `Session._do_request`/`_exchange`/`_connect_proxied`.
+  Two mechanisms mirroring python `requests`: an **http target** is sent to the proxy in
+  **absolute form** (`GET http://host/path HTTP/1.1` via `build_request(..., absolute_target=True)`);
+  an **https target** is **CONNECT-tunneled** (`tunnel_connect` sends `CONNECT host:port`, expects
+  2xx, then the normal TLS handshake runs end-to-end over the tunnel with SNI/cert verification
+  against the *target* host). DNS resolves the *proxy* host on the proxied path. A new `ProxyError`
+  exception category (CONNECT refused / bad or unsupported proxy URL) is added to `exceptions.mojo`
+  + `exception_kind`. Live-tested through a forward proxy added to `tests/server.py` (`PROXY_URL`),
+  exercised by [`tests/test_proxy.mojo`](tests/test_proxy.mojo). **Deferred:** proxy authentication /
+  userinfo in the proxy URL (`http://user:pass@proxy` — `parse_url` has no userinfo support yet),
+  **https proxies** (TLS *to the proxy itself* — only http proxies are supported; an https proxy
+  URL raises `ProxyError`), and **pooling of proxied connections** (each proxied request opens a
+  fresh connection — the keep-alive pool is bypassed; pooling by proxy endpoint is future work).
+  Also unhandled: `NO_PROXY` / `*_PROXY` environment variables (proxies come only from the
+  parameter / Session field).
 - [x] **`REQUESTS_CA_BUNDLE` env var** — honor it as the CA cert path (matches python `requests` semantics: `export REQUESTS_CA_BUNDLE=/etc/ssl/certs/ca-certificates.crt`). Useful on CI / minimal Linux images where the system trust store path differs from OpenSSL's defaults. Implemented in `_tls.mojo`: trust-store resolution order is `ca_bundle` param > `$REQUESTS_CA_BUNDLE` > `$SSL_CERT_FILE` > OpenSSL system defaults.
 - [x] **Rewrite exceptions as typed `Error` structs** — replace the current string-prefix-based error model (functions in `exceptions.mojo` that build `Error(t"ConnectionError: ...")` + an `exception_kind()` classifier that matches on the message prefix) with proper Mojo typed errors, following this pattern:
 

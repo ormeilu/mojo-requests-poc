@@ -24,6 +24,7 @@ def request(
     stream: Bool = False,
     verify: Optional[Bool] = None,
     ca_bundle: Optional[String] = None,
+    proxies: Optional[Dict[String, String]] = None,
 ) raises -> Response:
     """Send an HTTP request and return a Response."""
     var s = Session()
@@ -39,6 +40,7 @@ def request(
         stream=stream,
         verify=verify,
         ca_bundle=ca_bundle,
+        proxies=proxies,
     )
 
 
@@ -51,6 +53,7 @@ def get(
     stream: Bool = False,
     verify: Optional[Bool] = None,
     ca_bundle: Optional[String] = None,
+    proxies: Optional[Dict[String, String]] = None,
 ) raises -> Response:
     """Send an HTTP GET request."""
     var s = Session()
@@ -63,6 +66,7 @@ def get(
         stream=stream,
         verify=verify,
         ca_bundle=ca_bundle,
+        proxies=proxies,
     )
 
 
@@ -74,6 +78,7 @@ def post(
     timeout: Optional[Float64] = None,
     verify: Optional[Bool] = None,
     ca_bundle: Optional[String] = None,
+    proxies: Optional[Dict[String, String]] = None,
 ) raises -> Response:
     """Send an HTTP POST request."""
     var s = Session()
@@ -85,6 +90,7 @@ def post(
         timeout=timeout,
         verify=verify,
         ca_bundle=ca_bundle,
+        proxies=proxies,
     )
 
 
@@ -96,6 +102,7 @@ def put(
     timeout: Optional[Float64] = None,
     verify: Optional[Bool] = None,
     ca_bundle: Optional[String] = None,
+    proxies: Optional[Dict[String, String]] = None,
 ) raises -> Response:
     """Send an HTTP PUT request."""
     var s = Session()
@@ -107,6 +114,7 @@ def put(
         timeout=timeout,
         verify=verify,
         ca_bundle=ca_bundle,
+        proxies=proxies,
     )
 
 
@@ -118,6 +126,7 @@ def patch(
     timeout: Optional[Float64] = None,
     verify: Optional[Bool] = None,
     ca_bundle: Optional[String] = None,
+    proxies: Optional[Dict[String, String]] = None,
 ) raises -> Response:
     """Send an HTTP PATCH request."""
     var s = Session()
@@ -129,6 +138,7 @@ def patch(
         timeout=timeout,
         verify=verify,
         ca_bundle=ca_bundle,
+        proxies=proxies,
     )
 
 
@@ -138,6 +148,7 @@ def delete(
     timeout: Optional[Float64] = None,
     verify: Optional[Bool] = None,
     ca_bundle: Optional[String] = None,
+    proxies: Optional[Dict[String, String]] = None,
 ) raises -> Response:
     """Send an HTTP DELETE request."""
     var s = Session()
@@ -147,6 +158,7 @@ def delete(
         timeout=timeout,
         verify=verify,
         ca_bundle=ca_bundle,
+        proxies=proxies,
     )
 
 
@@ -156,6 +168,7 @@ def head(
     timeout: Optional[Float64] = None,
     verify: Optional[Bool] = None,
     ca_bundle: Optional[String] = None,
+    proxies: Optional[Dict[String, String]] = None,
 ) raises -> Response:
     """Send an HTTP HEAD request."""
     var s = Session()
@@ -165,6 +178,7 @@ def head(
         timeout=timeout,
         verify=verify,
         ca_bundle=ca_bundle,
+        proxies=proxies,
     )
 
 
@@ -174,6 +188,7 @@ def options(
     timeout: Optional[Float64] = None,
     verify: Optional[Bool] = None,
     ca_bundle: Optional[String] = None,
+    proxies: Optional[Dict[String, String]] = None,
 ) raises -> Response:
     """Send an HTTP OPTIONS request."""
     var s = Session()
@@ -183,4 +198,5 @@ def options(
         timeout=timeout,
         verify=verify,
         ca_bundle=ca_bundle,
+        proxies=proxies,
     )

@@ -23,11 +23,12 @@ percent-encoding, and a JSON parser — is written in Mojo.
 # Clone, then enter the environment
 pixi shell
 
-# Run the test suite (61 tests: 32 HTTP + 11 HTTPS + 6 streaming + 12 keep-alive)
+# Run the test suite (76 tests: 34 HTTP + 11 HTTPS + 6 streaming + 12 keep-alive + 13 proxy)
 pixi run test                # core HTTP / URL / JSON tests
 pixi run test-https          # HTTPS-specific tests
 pixi run test-streaming      # stream=True + iter_content (live network)
 pixi run test-keepalive      # connection pooling / keep-alive
+pixi run test-proxy          # HTTP proxy forwarding + HTTPS CONNECT tunneling
 # …or run them all:
 pixi run test-all
 
@@ -86,6 +87,16 @@ for chunk in r6.iter_content(8192):
 print("downloaded bytes:", total)
 # text() also works — it auto-drains the stream first.
 
+# Proxies: route through an HTTP proxy (http targets forwarded; https targets CONNECT-tunneled)
+var r7 = requests.get(
+    "https://example.com/",
+    proxies={"https": "http://127.0.0.1:8888"},
+)
+# Per-Session default (applies to every request unless a per-call `proxies` overrides it):
+var ps = requests.Session()
+ps.proxies["http"] = "http://127.0.0.1:8888"
+ps.proxies["https"] = "http://127.0.0.1:8888"
+
 # Error handling
 var err = s.get("http://example.com/missing")
 err.raise_for_status()      # raises HTTPError on 4xx/5xx
@@ -99,14 +110,14 @@ All mirror Python's `requests`:
 
 | Function  | Signature |
 |-----------|-----------|
-| `get`     | `(url, params?, headers?, timeout?, verify?, ca_bundle?)` |
-| `post`    | `(url, data?, json?, headers?, timeout?, verify?, ca_bundle?)` |
-| `put`     | `(url, data?, json?, headers?, timeout?, verify?, ca_bundle?)` |
-| `patch`   | `(url, data?, json?, headers?, timeout?, verify?, ca_bundle?)` |
-| `delete`  | `(url, headers?, timeout?, verify?, ca_bundle?)` |
-| `head`    | `(url, headers?, timeout?, verify?, ca_bundle?)` |
-| `options` | `(url, headers?, timeout?, verify?, ca_bundle?)` |
-| `request` | `(method, url, params?, headers?, data?, json?, timeout?, verify?, ca_bundle?)` |
+| `get`     | `(url, params?, headers?, timeout?, verify?, ca_bundle?, proxies?)` |
+| `post`    | `(url, data?, json?, headers?, timeout?, verify?, ca_bundle?, proxies?)` |
+| `put`     | `(url, data?, json?, headers?, timeout?, verify?, ca_bundle?, proxies?)` |
+| `patch`   | `(url, data?, json?, headers?, timeout?, verify?, ca_bundle?, proxies?)` |
+| `delete`  | `(url, headers?, timeout?, verify?, ca_bundle?, proxies?)` |
+| `head`    | `(url, headers?, timeout?, verify?, ca_bundle?, proxies?)` |
+| `options` | `(url, headers?, timeout?, verify?, ca_bundle?, proxies?)` |
+| `request` | `(method, url, params?, headers?, data?, json?, timeout?, verify?, ca_bundle?, proxies?)` |
 
 Arguments are keyword-friendly with `Optional[...] = None` defaults. Collection args (`params`, `headers`)
 are consumed (transferred with `^`) since Mojo's `Dict` is not implicitly copyable.
@@ -143,6 +154,40 @@ with requests.Session() as s:
 Streaming responses (`stream=True`) are never pooled — the live connection is owned by the
 `Response` until it is dropped. Connection reuse is per-`Session`; the module-level functions
 (`requests.get`, …) create a throwaway Session and so do not pool across calls.
+
+### Proxies
+
+Pass a `proxies` map (`{scheme: proxy_url}`) per call, or set `Session.proxies` as a default.
+Keys are the **target** scheme — `"http"`, `"https"`, or `"all"` (catch-all); a per-call
+`proxies` fully overrides the `Session` default.
+
+```mojo
+requests.get("http://example.com/",  proxies={"http":  "http://127.0.0.1:8888"})
+requests.get("https://example.com/", proxies={"https": "http://127.0.0.1:8888"})
+requests.get("https://example.com/", proxies={"all":   "http://127.0.0.1:8888"})
+```
+
+**Supported proxy protocols:**
+
+| Proxy protocol | Target `http://` | Target `https://` |
+|----------------|:----------------:|:-----------------:|
+| **HTTP proxy** (`http://proxy…`) | ✅ absolute-form forwarding | ✅ `CONNECT` tunnel + end-to-end TLS |
+
+- Only **HTTP proxies** are supported (the proxy URL must be `http://…`). For an `http://`
+  target the request is forwarded to the proxy in absolute form (`GET http://host/path …`); for
+  an `https://` target the client opens a `CONNECT host:port` tunnel through the proxy, then runs
+  the TLS handshake end-to-end with the target (SNI + certificate verification apply to the
+  **target**, not the proxy).
+
+**Not supported** (raise `ProxyError` or are simply ignored):
+
+- **HTTPS proxies** — TLS *to the proxy itself* (an `https://…` proxy URL raises `ProxyError`).
+- **SOCKS proxies** (`socks5://`, `socks4://`) — not implemented.
+- **Proxy authentication** / userinfo in the proxy URL (`http://user:pass@proxy`).
+- **`HTTP_PROXY` / `HTTPS_PROXY` / `NO_PROXY` environment variables** — proxies come only from the
+  `proxies` argument or the `Session.proxies` field, never the environment.
+
+Proxied requests are **not pooled** (each opens a fresh connection to the proxy).
 
 ### `Response`
 
@@ -187,6 +232,7 @@ any category-specific fields:
 | `HTTPError`         | `status_code`  | `raise_for_status()` on a 4xx/5xx |
 | `InvalidURL`        | —              | malformed URL |
 | `UnsupportedScheme` | `scheme`       | non-`http(s)` scheme |
+| `ProxyError`        | `host`         | CONNECT tunnel refused / bad or unsupported (non-http) proxy URL |
 | `RequestException`  | —              | generic / fallback |
 
 You raise them directly (`raise ConnectionError("...", host=h)`); Mojo wraps the struct in its

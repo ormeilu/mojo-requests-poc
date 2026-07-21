@@ -16,8 +16,12 @@ test-streaming = "mojo -I . tests/test_streaming.mojo"
 # Run the connection-pooling / keep-alive suite (framing-helper unit tests + live reuse tests —
 # reads BASE_URL / HTTPS_BASE_URL / SSL_CERT_FILE from env; needs an HTTP/1.1 server)
 test-keepalive = "mojo -I . tests/test_keepalive.mojo"
+# Run the proxy suite (selection/absolute-form/CONNECT unit tests + live HTTP-forward and
+# HTTPS-CONNECT-tunnel tests through tests/server.py's forward proxy — reads PROXY_URL / BASE_URL
+# / HTTPS_BASE_URL from env; live tests are skipped when PROXY_URL is unset)
+test-proxy = "mojo -I . tests/test_proxy.mojo"
 # Run all unit + live tests
-test-all = "mojo -I . tests/test_requests.mojo && mojo -I . tests/test_https.mojo && mojo -I . tests/test_streaming.mojo && mojo -I . tests/test_keepalive.mojo"
+test-all = "mojo -I . tests/test_requests.mojo && mojo -I . tests/test_https.mojo && mojo -I . tests/test_streaming.mojo && mojo -I . tests/test_keepalive.mojo && mojo -I . tests/test_proxy.mojo"
 # Run the demo (optionally start a local server first: pixi run server)
 demo = "mojo -I . examples/demo.mojo"
 # Run benchmarks: python requests vs httpx vs mojo-requests (hyperfine)
