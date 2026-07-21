@@ -2,22 +2,60 @@
 
 ## Async support
 
-Mojo 1.0 has **no built-in async/threading** primitives — no `std.async`, no `Coroutine`, no `Thread`,
-no `async`/`await` syntax. Adding async to mojo-requests requires building the concurrency layer
-from scratch via libc FFI.
+> **Correction (2026-07):** This section previously claimed "Mojo 1.0 has no built-in
+> async/threading primitives." That is wrong about async — native async exists. The reframed
+> plan below reflects it. See [`STRUGGLES.md`](STRUGGLES.md) §6.4 for the full API probe.
 
-**Viable approach (verified): non-blocking sockets + `poll()` event loop**
+**What's already there.** Mojo 1.0 ships a native async runtime:
+- `std.runtime.asyncrt` — `Task`, `RaisingTask`, `TaskGroup`, `TaskGroupContext`,
+  `create_task`, `create_raising_task`, `parallelism_level()` (returns host CPU cores).
+- `async def foo() -> T` produces a `Coroutine[T, {}]`; `async def foo() raises -> T` produces
+  a `RaisingCoroutine[T, {}]`. `await` is a real operator. `Coroutine`/`RaisingCoroutine` live
+  in `std.builtin.coroutine`.
+- A native runtime backs it (`libAsyncRT*.dylib`), so no manual event loop is needed.
 
-- Set sockets to non-blocking via `fcntl(fd, F_SETFL, O_NONBLOCK)` — `fcntl` is FFI-able via `external_call`.
-- Use `poll(struct pollfd*, nfds, timeout)` to multiplex multiple in-flight sockets — **verified working** via `external_call["poll", ...]`.
-- Implement a single-threaded event loop (like Node.js / Python asyncio): issue N concurrent requests, poll for readiness, read/respond as sockets become ready.
-- API: `requests.AsyncSession` with `async_get` / `gather()` semantics.
+**Preferred approach: build `AsyncSession` on `std.runtime.asyncrt`.**
 
-**Alternative approaches (rejected for now):**
-- `pthread_create` via FFI — needs C-ABI function pointers, which Mojo doesn't cleanly expose yet.
+- Wrap the existing blocking `_do_request` coroutine so an `async def _async_request(...)`
+  returns a `RaisingCoroutine[Response, ...]`.
+- `AsyncSession.gather(urls)` runs N of them concurrently inside a `TaskGroup`, collects via
+  `RaisingTask.wait`, returns `List[Response]`.
+- API: `requests.AsyncSession` with `async_get` / `gather()` semantics — mirrors
+  `httpx.AsyncClient` / `requests`-style ergonomics.
+
+**Real blockers in the pinned build (`1.0.0b3.dev2026071921`) — these are why this isn't done
+yet:**
+
+- `TaskGroup` exposes only `__init__` / `__del__` / `wait` — **no public `.add()` / `.spawn()`**.
+  Tasks attach to a group via the `TaskGroupContext` callback + `create_task`'s `out` parameter.
+- `TaskGroupContext`'s constructor needs an **unsafe `Pointer[TaskGroup, MutUntrackedOrigin]`**
+  with no clean construction path in this build (no `std.unsafe` / `std.ptr`).
+- The context callback must be **`thin` (non-raising)** — raising work has to propagate via
+  `RaisingTask.wait`'s `out result`.
+- It's unverified whether two `create_task` coroutines actually run on separate OS threads in
+  this build (the runtime reports CPU-core parallelism, but the submission API is too rough to
+  exercise from the REPL without more probing).
+
+So `AsyncSession` is feasible but needs the asyncrt surface either probed deeper or the pin
+bumped to a newer nightly where the ergonomics may have settled.
+
+**Fallback (only if asyncrt stays unusable): non-blocking sockets + `poll()` event loop**
+
+- Set sockets non-blocking via `fcntl(fd, F_SETFL, O_NONBLOCK)` — `fcntl` is FFI-able.
+- Multiplex with `poll(struct pollfd*, nfds, timeout)` — verified working via
+  `external_call["poll", ...]`.
+- Single-threaded event loop (Node.js / Python asyncio style): issue N concurrent requests,
+  poll for readiness, read/respond as sockets become ready.
+- Demoted from "verified viable" to "fallback" — it duplicates work the native runtime already
+  does.
+
+**Alternative approaches (rejected):**
+- `pthread_create` via FFI — needs C-ABI function pointers Mojo doesn't cleanly expose yet.
 - `fork()` via FFI — process-level concurrency, heavy and awkward for sharing state.
 
-**Benchmark impact:** Once async lands, add `benchmark/bench_mojo_requests_async.mojo` (concurrent requests) and `benchmark/bench_python_httpx_async.py` (`httpx.AsyncClient`) to the hyperfine comparison.
+**Benchmark impact:** Once async lands, add `benchmark/bench_mojo_requests_async.mojo`
+(concurrent requests) and `benchmark/benchmark_python_httpx_async.py` (`httpx.AsyncClient`) to
+the hyperfine comparison.
 
 ## Other roadmap items
 

@@ -290,12 +290,45 @@ only correct option.
 
 **Where:** [`requests/_tls.mojo`](requests/_tls.mojo) `_load_libssl` (~L306-333).
 
-### 6.4 No async/threading primitives → out of scope for now
+### 6.4 Async exists (`std.runtime.asyncrt`); threading primitives do not
 
-No `std.async`, no `Coroutine`, no `Thread`, no `async`/`await`. `pthread_create` via FFI
-needs C-ABI function pointers Mojo doesn't cleanly expose; `fork()` is process-level and
-awkward for sharing state. The verified-but-unbuilt path is non-blocking sockets + a `poll()`
-event loop — see [`TODO.md`](TODO.md) "Async support".
+**Correction of this entry's old claim.** The original text said "no `std.async`, no `Coroutine`,
+no `async`/`await`." That is **wrong for this build**. Native async is present:
+
+- **`std.runtime.asyncrt`** imports cleanly and exposes `Task[type, origins]`,
+  `RaisingTask[type, origins]`, `TaskGroup`, `TaskGroupContext`, and the free functions
+  `create_task(handle, out task)`, `create_raising_task[...](handle, out task)`, and
+  `parallelism_level() -> Int` (returns host CPU core count; there is also a GPU-flavoured
+  overload taking `Optional[DeviceContext]`).
+- **`async def`/`await` syntax works.** `async def foo() -> T` produces a `Coroutine[T, {}]`;
+  `async def foo() raises -> T` produces a `RaisingCoroutine[T, {}]`. `await` is a real operator
+  dispatching on `__await__`. `Coroutine`/`RaisingCoroutine` live in `std.builtin.coroutine`
+  (not `std.coroutine`).
+- A native runtime backs it: `libAsyncRTMojoBindings.dylib` + `libAsyncRTRuntimeGlobals.dylib`
+  ship with the toolchain. No explicit start/stop API — `parallelism_level()` works with no
+  setup.
+
+**What is still absent in this build** (the threading half of the original claim stands):
+`std.thread`, `std.socket`, `std.ssl`, `std.net`, `std.json`, `std.unsafe`, `std.ptr` are all
+missing. So raw libc FFI for sockets/networking (§6.2) and the hand-written JSON parser (§6.1)
+remain necessary — but a concurrency layer now exists on top of them.
+
+**Ergonomic gaps in this build** (honest caveats — the API is real but rough for an HTTP client
+that wants parallel requests):
+- `TaskGroup` exposes only `__init__` / `__del__` / `wait` — **no public `.add()` / `.spawn()`**.
+  Tasks are associated with a group via the `TaskGroupContext` callback + `create_task`'s
+  `out` parameter, not a direct submit.
+- `TaskGroupContext`'s constructor takes an **unsafe `Pointer[TaskGroup, MutUntrackedOrigin]`**,
+  which has no clean construction path in this build (no `std.unsafe`/`std.ptr`).
+- The context's callback must be **`thin` (non-raising)** — a `def cb(mut g: TaskGroup) raises`
+  is rejected. Raising work has to propagate via `RaisingTask.wait`'s `out result` instead.
+- `DeviceContext` (the GPU context re-exported into asyncrt) fails to construct on a host
+  without a GPU, so the `parallelism_level(ctx)` overload is effectively GPU-only here.
+
+**So:** a future `AsyncSession.gather()` should target `std.runtime.asyncrt`, not the
+hand-rolled `poll()` loop this file used to recommend. The `poll()` approach is now a fallback
+if the asyncrt surface stays this rough. See [`TODO.md`](TODO.md) "Async support" for the
+reframed plan.
 
 ### 6.5 Pure-Mojo TLS is explicitly out of scope
 
@@ -357,12 +390,59 @@ Mojo `requests/` package dir shadows pip's `requests`.
 
 **Where:** [`benchmark/run.sh`](benchmark/run.sh) (~L58, L70).
 
-### 8.5 No platform-detection builtin in this build
+### 8.5 Platform detection — three spellings, one works in this build
 
-`std.sys.info.is_apple` / `is_linux` / `is_macos` (from the GPU skill docs) **do not exist**
-in this stdlib build. `target_os`, `__is_macosx`, `OS.macOS` — none of them resolve either.
-There also appears to be no `compiles(...)` intrinsic for guarding speculative calls. This is
-why §1.3's portable errno detection had to use a universally-available POSIX API instead.
+**Symptom:** Needed OS-conditional code (originally for portable `AF_INET6` naming and the errno
+accessor in §1.3).
+
+**Cause — the names moved around; this entry chased them twice.** The original text tested the
+GPU-skill spellings `is_apple` / `is_linux` / `is_macos` and the C-isms `target_os` /
+`__is_macosx` / `OS.macOS` — all wrong. Verified now, there are **three** legitimate spellings
+in `std.sys.info`, and they are *not* equivalent in the pinned build (`>=1.0.0b3.dev2026071921,<2`):
+
+| Spelling | Status in pinned build | Notes |
+|---|---|---|
+| `os_is_linux()` / `os_is_macos()` — free functions in `std.sys.info` | **DO NOT resolve** — `module 'info' does not contain 'os_is_linux'` | Pin-drift. These exist in current mojolang.org docs but not in our build. |
+| `CompilationTarget.is_linux()` / `.is_macos()` — static methods on the `CompilationTarget` struct | **WORK** — verified at runtime (returns `macos` on this host) | **This is the one to use.** Requires `from std.sys.info import CompilationTarget`. |
+| `is_gpu()` / `has_accelerator()` / `is_little_endian()` / `is_big_endian()` — free functions in `std.sys.info` | WORK | Unrelated to OS detection but commonly confused with it. |
+
+Per the [CompilationTarget docs](https://mojolang.org/docs/std/sys/info/CompilationTarget/), the
+struct also exposes a large CPU-feature family (`is_x86`, `is_apple_silicon`, `is_apple_m1`..`m5`,
+`has_avx*`, `has_neon*`, …). **Note: there is no `is_windows` in any spelling** — Mojo does not
+target Windows, so don't write a `CompilationTarget.is_windows()` branch (it won't compile).
+
+**The working pattern:**
+
+```mojo
+from std.sys.info import CompilationTarget
+
+comptime if CompilationTarget.is_macos():
+    EAGAIN = 35
+comptime if CompilationTarget.is_linux():
+    EAGAIN = 11
+```
+
+(The docs' own example omits the required `std.` prefix — `from sys.info import ...` does not
+parse; the working form is `from std.sys.info import ...`.)
+
+**Why this entry still matters despite the fix.** The `CompilationTarget.is_*()` predicates are
+**compile-time** (they select code at build time, not runtime). For portable runtime values that
+the *library* needs to pass to libc — like `AF_INET6` (macOS 30, Linux 10) — you either
+(a) branch with `comptime if CompilationTarget.is_*()` to pick the constant at build time, or
+(b) sidestep the constant entirely. Option (b) is what this repo uses:
+
+- §1.3's errno detection uses `getsockopt(SO_ERROR)` — a POSIX API that exists on every platform
+  — so no OS branch is needed at all.
+- The planned IPv6 work ([`TODO.md`](TODO.md)) uses `getaddrinfo(AF_UNSPEC)` and reads
+  `ai_family` back at runtime, so the socket layer never names `AF_INET6` or branches on OS.
+
+There appears to be no `compiles(...)` intrinsic in this build for guarding speculative calls, so
+you cannot `comptime if compiles(...)` your way past a missing symbol — pick an API that exists,
+or branch on `CompilationTarget.is_*()`.
+
+**Where:** [`requests/_net.mojo`](requests/_net.mojo) `_is_timeout()` (~L162-185) — the POSIX
+`SO_ERROR` workaround. Planned: [`requests/_dns.mojo`](requests/_dns.mojo) /
+[`requests/_net.mojo`](requests/_net.mojo) for the `AF_UNSPEC` + runtime-`ai_family` IPv6 path.
 
 ---
 
