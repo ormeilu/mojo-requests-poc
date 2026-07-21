@@ -24,14 +24,12 @@ from .exceptions import ConnectionError
 
 
 # POSIX constants.
-# AF_INET (2), AF_UNSPEC (0), SOCK_STREAM (1), and AI_NUMERICHOST (0x4) are identical on
-# macOS and Linux. **AF_INET6 is NOT portable** — it's 30 on macOS/BSD and 10 on Linux — so we
-# never hard-code it; _af_inet6() discovers the platform's value at runtime via an inet_pton
-# probe (see below).
+# AF_INET (2), AF_UNSPEC (0), and SOCK_STREAM (1) are identical on macOS and Linux.
+# **AF_INET6 is NOT portable** — it's 30 on macOS/BSD and 10 on Linux — so we never hard-code
+# it; _af_inet6() discovers the platform's value at runtime via an inet_pton probe (see below).
 comptime AF_INET: c_int = 2
 comptime AF_UNSPEC: c_int = 0
 comptime SOCK_STREAM: c_int = 1
-comptime AI_NUMERICHOST: c_int = 0x4  # macOS/Linux
 
 
 @fieldwise_init

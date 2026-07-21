@@ -278,16 +278,27 @@ IPv6 literal failed immediately.
 (`#include <sys/socket.h>`; `printf("AF_INET6=%d\n", AF_INET6)`). The original plan assumed
 they were identical; they are not.
 
-**Fix:** Don't hard-code `AF_INET6` anywhere. For literal parsing, route IPv6 through
-`getaddrinfo(host, AI_NUMERICHOST)` instead of `inet_pton(AF_INET6, ...)` — `getaddrinfo`
-reports the correct per-platform `ai_family`. For `socket()` / `sin6_family`, carry the raw
-`ai_family` value through in `ResolvedAddress.pf` and pass *that* (not a comptime constant).
-Family detection in the addrinfo walk compares against the portable `AF_INET` (2) and treats
-anything else as IPv6 — with our `AF_UNSPEC` + `SOCK_STREAM` hints, `getaddrinfo` only ever
-returns AF_INET or AF_INET6, so this is safe.
+**Fix:** Don't hard-code `AF_INET6` anywhere. **Discover it at runtime** with `_af_inet6()`:
+call `inet_pton(candidate, "::1", &dst)` against each known family value (`10` Linux, `30`
+macOS/BSD) and keep whichever returns `1`. For `socket()` / `sin6_family`, carry that value
+through in `ResolvedAddress.pf` and pass *that* (not a comptime constant). Family detection in
+the addrinfo walk compares against the portable `AF_INET` (2) and treats anything else as IPv6
+— with our `AF_UNSPEC` + `SOCK_STREAM` hints, `getaddrinfo` only ever returns AF_INET or
+AF_INET6, so this is safe.
 
-**Where:** [`requests/_dns.mojo`](requests/_dns.mojo) (no `AF_INET6` comptime const exists;
-family carried via `ResolvedAddress.pf`), [`requests/_net.mojo`](requests/_net.mojo) `_do_connect`.
+**Correction (2026-07):** an earlier version of this Fix said to route IPv6 literals through
+`getaddrinfo(host, AI_NUMERICHOST)` "because it reports the correct per-platform `ai_family`".
+That was **wrong in practice** — `getaddrinfo` consults the kernel's configured address families
+and **FAILS for `::1` / `2001:db8::1` on hosts with no IPv6 networking** (GitHub ubuntu runners),
+even though the text is valid. It broke `test_resolve_ipv6_*` on ubuntu-latest CI (see commit
+`3d42d01`). `inet_pton` is a pure userspace text→binary parser with no kernel dependency, so it
+works everywhere — which is why literal parsing now uses `_af_inet6()` + `inet_pton`, and
+`getaddrinfo` is reserved for the *hostname* path only. The `AI_NUMERICHOST` comptime const was
+deleted (dead code).
+
+**Where:** [`requests/_dns.mojo`](requests/_dns.mojo) — `_af_inet6()` probe + `resolve()` IPv6
+branch (no `AF_INET6` comptime const exists; family carried via `ResolvedAddress.pf`),
+[`requests/_net.mojo`](requests/_net.mojo) `_do_connect`.
 
 ### 5.7 Sliced-String host handed to `getaddrinfo` gets clobbered (same class as §1.1)
 
@@ -335,7 +346,19 @@ Mojo has no mutable module-level state. So we can't cache the libssl handle glob
 `TLSConnection` opens (and closes) its own `OwnedDLHandle`. There's a small cost but it's the
 only correct option.
 
-**Where:** [`requests/_tls.mojo`](requests/_tls.mojo) `_load_libssl` (~L306-333).
+**Symptom (exact):** a top-level `var x: c_int = ...` fails to *compile* with
+`global variables are not supported; move this into a function body or use 'comptime' to declare
+a constant`. This is a hard parse error, not a runtime issue — the module won't build at all.
+`comptime X = ...` works for *immutable* constants, but there is no mutable equivalent.
+
+**Consequence for caching:** you cannot memoize an expensive probe in a module-level cache. The
+`_af_inet6()` DNS probe (§5.6) originally tried `var _af_inet6_cache: c_int = -1` and hit exactly
+this error (commit `3d42d01`); the fix was to drop the cache and just re-probe (cheap). Any
+"compute once, stash globally" pattern must instead thread the value through a struct field or
+recompute.
+
+**Where:** [`requests/_tls.mojo`](requests/_tls.mojo) `_load_libssl` (~L306-333),
+[`requests/_dns.mojo`](requests/_dns.mojo) `_af_inet6()`.
 
 ### 6.4 Async exists (`std.runtime.asyncrt`); threading primitives do not
 
@@ -480,8 +503,11 @@ the *library* needs to pass to libc — like `AF_INET6` (macOS 30, Linux 10) —
 
 - §1.3's errno detection uses `getsockopt(SO_ERROR)` — a POSIX API that exists on every platform
   — so no OS branch is needed at all.
-- The planned IPv6 work ([`TODO.md`](TODO.md)) uses `getaddrinfo(AF_UNSPEC)` and reads
-  `ai_family` back at runtime, so the socket layer never names `AF_INET6` or branches on OS.
+- The IPv6 work uses two runtime tricks instead of an OS branch: the *hostname* path reads
+  `ai_family` back from `getaddrinfo(AF_UNSPEC)`, and the *literal* path discovers `AF_INET6`
+  with `_af_inet6()` — an `inet_pton` probe over the known candidate values (§5.6). Both source
+  the platform value at runtime, so the socket layer never hard-codes `AF_INET6` or `comptime
+  if`-branches on OS.
 
 There appears to be no `compiles(...)` intrinsic in this build for guarding speculative calls, so
 you cannot `comptime if compiles(...)` your way past a missing symbol — pick an API that exists,
