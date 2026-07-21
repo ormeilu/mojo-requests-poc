@@ -357,10 +357,19 @@ and `mojo-requests` (both `mojo run` with compile, and a pre-built binary withou
 
 ### Methodology
 
-- Each run issues **200 sequential GET requests** to a local `python3 -m http.server` (no network
-  variance).
-- All implementations use a **session/client** (keep-alive connection reuse where supported).
-- hyperfine: **3 warmup runs + 10 measured runs** per implementation.
+- Each run issues **200 sequential GET requests** against `tests/server.py` — the same
+  `ThreadingHTTPServer` the live test suite runs against, serving a small fixed `index.html`
+  fixture on a local port. It sets `protocol_version = "HTTP/1.1"`, which matters: `python3 -m
+  http.server` (used by an earlier version of this benchmark) defaults to HTTP/1.0 and sends an
+  implicit `Connection: close` on every response — meaning **none** of the three clients ever
+  got to reuse a TCP connection, no matter what keep-alive/pooling logic they implement. Using
+  the HTTP/1.1 test server means the "session/client" framing below is actually true.
+- All implementations use a **session/client** (keep-alive connection reuse — genuinely
+  exercised now, see above).
+- hyperfine: **3 warmup runs + 10 measured runs** per implementation, `--ignore-failure` is
+  **not** set, so a request failure aborts the whole run loudly rather than silently skewing the
+  timing (`bench_mojo_requests.mojo` calls `r.raise_for_status()`, mirroring the Python scripts'
+  `raise_for_status()`).
 
 ### System
 
@@ -375,21 +384,20 @@ and `mojo-requests` (both `mojo run` with compile, and a pre-built binary withou
 | **httpx** | 0.28.1 |
 | **hyperfine** | 1.20.0 |
 
-### Results (200 sequential GETs)
+### Results (200 sequential GETs, real HTTP/1.1 keep-alive)
 
 | Command | Mean ± σ | Min | Max | Relative |
 |:---|---:|---:|---:|---:|
-| `mojo (pre-built)` | **101.1 ms ± 14.8 ms** | 90.6 ms | 140.3 ms | **1.00** |
-| `python httpx` | 300.8 ms ± 52.5 ms | 259.4 ms | 400.7 ms | 2.98× |
-| `python requests` | 318.9 ms ± 40.2 ms | 289.8 ms | 415.1 ms | 3.15× |
-| `mojo run (incl. compile)` | 1474.7 ms ± 28.8 ms | 1445.6 ms | 1541.7 ms | 14.59× |
+| `mojo (pre-built)` | **30.1 ms ± 0.8 ms** | 29.0 ms | 31.9 ms | **1.00** |
+| `python httpx` | 216.3 ms ± 7.3 ms | 208.0 ms | 229.7 ms | 7.20× |
+| `python requests` | 238.3 ms ± 14.4 ms | 223.6 ms | 272.6 ms | 7.93× |
+| `mojo run (incl. compile)` | 1398.0 ms ± 18.9 ms | 1371.9 ms | 1431.5 ms | 46.52× |
 
-> mojo-requests (pre-built) is **~3–3.2× faster** than Python `requests` and `httpx`.
-> The `mojo run` row includes ~1.37 s of compile time per invocation — use `mojo build` for
-> production (the pre-built binary is the fair comparison). This run reflects the TLS
-> cipher-curation and session-resumption work added since the previous benchmark; the
-> absolute numbers moved a bit run-to-run (shared-machine noise), but the ~3× relative gap
-> over Python held steady.
+> mojo-requests (pre-built) is **~7–8× faster** than Python `requests` and `httpx` once the
+> benchmark server actually supports keep-alive (previous README revisions measured against an
+> HTTP/1.0 server by mistake and undersold the gap at ~3×; see `benchmark/run.sh` and
+> `STRUGGLES.md` for the fix). The `mojo run` row includes ~1.37 s of compile time per
+> invocation — use `mojo build` for production (the pre-built binary is the fair comparison).
 
 Full results are exported to `benchmark/results.md` on each run.
 

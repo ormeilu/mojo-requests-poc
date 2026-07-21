@@ -495,6 +495,51 @@ Mojo `requests/` package dir shadows pip's `requests`.
 
 **Where:** [`benchmark/run.sh`](benchmark/run.sh) (~L58, L70).
 
+### 8.7 The benchmark server was silently testing HTTP/1.0 (no real keep-alive) — not a Mojo bug, but it hid one
+
+**Symptom:** The README's benchmark claimed "all implementations use a session/client (keep-alive
+connection reuse where supported)", but `curl -v` against the benchmark server showed every
+response closing the connection (`* Closing connection`), even though the client requested
+`HTTP/1.1`.
+
+**Cause:** `benchmark/run.sh` started the server with `python3 -m http.server`, and
+`http.server.BaseHTTPRequestHandler.protocol_version` **defaults to `"HTTP/1.0"`** — meaning
+every response implicitly carries `Connection: close`, regardless of what the client asks for.
+So *none* of the three benchmarked clients (python `requests`' `Session`, `httpx`'s `Client`,
+`mojo-requests`' `Session`) ever got to reuse a TCP connection — the benchmark was measuring
+full-handshake-per-request cost for all three, uniformly. Fair in a narrow sense (same
+conditions for everyone), but it silently defeated the entire point of the connection-pooling
+work in [`_pool.mojo`](requests/_pool.mojo) and inflated the Python comparison's relative
+standing (mojo-requests' TCP+TLS-per-request cost dominates when it can't amortize the
+handshake — Python's urllib3/httpcore pay the same tax, so the *relative* gap compresses even
+though the *absolute* numbers for all three get worse).
+
+**A second, related bug in the same command:** `python3 -m http.server` was invoked from the
+project root (`cd`'d there by the script), so `GET /` returned an `http.server`-generated
+directory listing of the **entire repository** — an uncontrolled, machine/checkout-dependent
+payload size — instead of a small fixed fixture.
+
+**Fix:** Use [`tests/server.py`](tests/server.py) (the same server the live test suite runs
+against) instead of `python3 -m http.server`. It's a `ThreadingHTTPServer` with
+`protocol_version = "HTTP/1.1"` set explicitly, and serves a small fixed `index.html` fixture
+from a dedicated temp directory — verified with `curl -v` showing `Re-using existing connection
+with host` on a second request. Re-running the benchmark after this fix changed mojo-requests'
+pre-built number from ~101 ms to **~30 ms** mean (200 sequential GETs) — the TLS/pooling work
+actually gets to do its job now, and the relative gap over Python widened from ~3× to ~7-8×.
+
+**Bonus asymmetry found in the same pass:** `benchmark/bench_mojo_requests.mojo` handled a
+failed request by `print`-ing and `return`-ing (exit code 0) instead of raising — so a broken
+mojo-requests run could silently produce a fast, "successful"-looking hyperfine sample, while
+the Python scripts' `raise_for_status()` would raise and (since hyperfine aborts on nonzero exit
+by default, no `--ignore-failure` set) halt the whole benchmark loudly. Fixed by calling
+`r.raise_for_status()` in the mojo script too, for symmetric fail-loud behavior. Also dropped a
+`2>/dev/null` on the `mojo build` step in `run.sh` that would have hidden a real compiler
+regression behind a bare "command failed" from `set -e`.
+
+**Where:** [`benchmark/run.sh`](benchmark/run.sh) (server startup),
+[`benchmark/bench_mojo_requests.mojo`](benchmark/bench_mojo_requests.mojo) (`raise_for_status`),
+[`README.md`](README.md) Benchmark section (methodology note + corrected numbers).
+
 ### 8.6 `mojo format` rejects a builtin name (`any`) used as a local variable — the compiler doesn't
 
 **Symptom:** `_pool.mojo` **compiled and ran fine**, but `mojo format` (hence CI's `fmt-check`)

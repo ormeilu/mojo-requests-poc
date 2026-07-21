@@ -27,9 +27,7 @@ def main() raises:
     var s = requests.Session()
     for _ in range(count):
         var r = s.get(url)
-        if not r.ok():
-            print("request failed:", r.status_code)
-            return
+        r.raise_for_status()
 
 
 def _parse_count(s: String) -> Int:

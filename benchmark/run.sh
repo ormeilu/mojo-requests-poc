@@ -30,9 +30,16 @@ echo "════════════════════════�
 echo ""
 
 # --- 1. Start a local HTTP server (stable, reproducible, no network variance) ---
-echo "▶ Starting local HTTP server on :${PORT} ..."
-# Use nohup + setsid to ensure the server survives subprocess transitions (pixi/hyperfine spawn children).
-nohup python3 -m http.server "${PORT}" --bind 127.0.0.1 >/dev/null 2>&1 &
+#
+# Uses tests/server.py (the same server the live test suite runs against) rather than
+# `python3 -m http.server`, which defaults to protocol_version = "HTTP/1.0" — meaning every
+# response carries an implicit `Connection: close` and NONE of the three clients (python
+# requests' Session, httpx's Client, mojo-requests' Session) ever get to reuse a TCP
+# connection, no matter what keep-alive/pooling logic they implement. tests/server.py sets
+# protocol_version = "HTTP/1.1" (ThreadingHTTPServer), so this benchmark actually exercises
+# the connection-reuse path the "session/client" framing below claims to measure.
+echo "▶ Starting local HTTP/1.1 test server (tests/server.py) on :${PORT} ..."
+nohup python3 "${BENCH_DIR}/../tests/server.py" --http-port "${PORT}" >/tmp/mojo-bench-server.log 2>&1 &
 SRV_PID=$!
 trap 'kill ${SRV_PID} 2>/dev/null || true' EXIT
 
@@ -43,7 +50,7 @@ for i in $(seq 1 10); do
     fi
     sleep 0.5
     if [ "$i" -eq 10 ]; then
-        echo "✗ Server did not start on :${PORT}"
+        echo "✗ Server did not start on :${PORT} — see /tmp/mojo-bench-server.log"
         exit 1
     fi
 done
@@ -52,7 +59,7 @@ echo ""
 
 # --- 2. Pre-build the mojo binary (compile time NOT measured) ---
 echo "▶ Building mojo benchmark binary (compile excluded from measurement) ..."
-mojo build -I . "${BENCH_DIR}/bench_mojo_requests.mojo" -o "${BENCH_DIR}/bench_mojo_requests" 2>/dev/null
+mojo build -I . "${BENCH_DIR}/bench_mojo_requests.mojo" -o "${BENCH_DIR}/bench_mojo_requests"
 echo "✓ Binary built"
 
 # Copy Python benchmarks to /tmp so they don't pick up the local requests/ Mojo package dir.
