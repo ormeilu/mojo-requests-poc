@@ -1,5 +1,13 @@
 # mojo-requests
 
+> **Proof of concept, almost entirely vibe-coded.** This is a solo experiment in how far an
+> AI-driven build could push a pure-Mojo HTTP client against a pre-stable, rapidly-moving
+> language — not a vetted, hand-audited production library, and not something intended to be
+> published as an official Mojo community package. That said: it's **Apache 2.0**, so anyone is
+> free to use it, fork it, harden it, or ship it as their own package if they find it useful —
+> and if Modular ever wants to fold any of this into `std`, that's fine too. No permission needed
+> beyond the license. Read the code before trusting it with anything that matters.
+
 A pure-Mojo HTTP client library, modeled after Python's [`requests`](https://docs.python-requests.org/).
 
 **No Python. No libcurl.** TCP sockets are provided via libc FFI (`external_call`) against the system's
@@ -7,8 +15,9 @@ libc (`socket`, `connect`, `send`, `recv`, `close`). HTTPS/TLS is provided via O
 and `dlopen`'d at runtime). Everything else — URL parsing, HTTP/1.1 framing, chunked transfer decoding,
 percent-encoding, and a JSON parser — is written in Mojo.
 
-> **Mojo version:** built and tested against Mojo 1.0.0b3 (nightly). Mojo is evolving rapidly; older or
-> newer builds may require small adjustments.
+> **Mojo version:** built and tested against Mojo 1.0.0b3 (nightly), currently pinned to
+> `dev2026072114` in [`pixi.toml`](pixi.toml). Mojo is evolving rapidly; older or newer builds may
+> require small adjustments — the pin gets bumped periodically as the nightly moves.
 
 > **Building this fought back.** Mojo 1.0 is pre-stable — FFI pointer-lifetime clobbers, interior-reference
 > slicing bugs, a partially-impossible typed-exception model, lazy-init DNS flakiness, and missing stdlib
@@ -315,11 +324,16 @@ requests/
 ├── models.mojo      # Response, Headers (case-insensitive)
 ├── _http.mojo       # HTTP/1.1 request building + response framing (Content-Length + chunked)
 ├── _url.mojo        # URL parser + percent-encoding
-├── _dns.mojo        # DNS resolution (inet_pton → getaddrinfo) via libc
+├── _dns.mojo        # DNS resolution (inet_pton → getaddrinfo) via libc, IPv4 + IPv6
 ├── _net.mojo        # TCPSocket: socket/connect/send/recv/close/timeout via libc FFI
-├── _tls.mojo        # TLSConnection: OpenSSL TLS layer (dlopen'd, SNI + cert verification)
+├── _tls.mojo        # TLSConnection: OpenSSL TLS layer (dlopen'd, SNI + cert verification +
+│                    # cipher curation + session-resumption cache)
+├── _streaming.mojo  # StreamingConn: owns the live socket/TLS for stream=True
+├── _pool.mojo       # KeptAliveConn: owns a reusable live socket/TLS for keep-alive; framed reads
+├── _proxy.mojo      # proxy selection + absolute-form request building + CONNECT tunneling
+├── _cookies.mojo    # CookieJar (Session-scoped, minimal name=value parsing)
 ├── _json.mojo       # minimal recursive-descent JSON parser (std.json doesn't exist in Mojo 1.0)
-└── exceptions.mojo  # error constructors + classifier
+└── exceptions.mojo  # typed error structs + exception_kind() classifier
 ```
 
 **Networking:** Mojo 1.0 has no `std.net` / `std.socket`. This library calls libc syscalls directly via
@@ -328,8 +342,12 @@ requests/
 
 **TLS/HTTPS:** OpenSSL is auto-discovered (Homebrew `/opt/homebrew/lib`, `/usr/local/lib`, Linux
 `/usr/lib`, etc.) and loaded at runtime via `OwnedDLHandle` (dlopen). The `TLSConnection` wraps the
-already-connected raw socket: `SSL_CTX_new` → `SSL_new` → `SSL_set_fd` → `SSL_set_tlsext_host_name` (SNI)
-→ `SSL_connect`. Certificate verification is enabled by default (`SSL_VERIFY_PEER` + system CA store).
+already-connected raw socket: `SSL_CTX_new` → cipher/protocol curation (TLS 1.2 floor, curated AEAD
+suites) → session-cache mode enabled → `SSL_new` → `SSL_set_fd` → `SSL_set_tlsext_host_name` (SNI)
+→ (optionally) `SSL_set_session` to offer a cached session → `SSL_connect`. Certificate verification
+is enabled by default (`SSL_VERIFY_PEER` + system CA store). A `Session` keeps a `TLSSessionCache`
+(host:port → `SSL_SESSION*`) so a re-connect to a previously-visited HTTPS endpoint can skip the
+asymmetric handshake via TLS session resumption.
 
 ## Benchmark
 
@@ -348,10 +366,10 @@ and `mojo-requests` (both `mojo run` with compile, and a pre-built binary withou
 
 | | |
 |---|---|
-| **OS** | macOS 26.4.1 (build 25E253) |
+| **OS** | macOS 26.5.2 (build 25F84) |
 | **CPU** | Apple M1 — 8 cores (8 logical) |
 | **RAM** | 16 GB |
-| **Mojo** | 1.0.0b3.dev2026071306 |
+| **Mojo** | 1.0.0b3.dev2026072114 |
 | **Python** | 3.14.6 |
 | **requests** | 2.34.2 |
 | **httpx** | 0.28.1 |
@@ -361,40 +379,59 @@ and `mojo-requests` (both `mojo run` with compile, and a pre-built binary withou
 
 | Command | Mean ± σ | Min | Max | Relative |
 |:---|---:|---:|---:|---:|
-| `mojo (pre-built)` | **76.6 ms ± 13.4 ms** | 63.4 ms | 109.9 ms | **1.00** |
-| `python httpx` | 280.8 ms ± 88.9 ms | 212.7 ms | 507.8 ms | 3.67× |
-| `python requests` | 282.3 ms ± 54.1 ms | 245.9 ms | 427.7 ms | 3.69× |
-| `mojo run (incl. compile)` | 1036.0 ms ± 20.0 ms | 1006.0 ms | 1064.0 ms | 13.52× |
+| `mojo (pre-built)` | **101.1 ms ± 14.8 ms** | 90.6 ms | 140.3 ms | **1.00** |
+| `python httpx` | 300.8 ms ± 52.5 ms | 259.4 ms | 400.7 ms | 2.98× |
+| `python requests` | 318.9 ms ± 40.2 ms | 289.8 ms | 415.1 ms | 3.15× |
+| `mojo run (incl. compile)` | 1474.7 ms ± 28.8 ms | 1445.6 ms | 1541.7 ms | 14.59× |
 
-> mojo-requests (pre-built) is **~3.7× faster** than Python `requests` and `httpx`.
-> The `mojo run` row includes ~960 ms of compile time per invocation — use `mojo build` for
-> production (the pre-built binary is the fair comparison).
+> mojo-requests (pre-built) is **~3–3.2× faster** than Python `requests` and `httpx`.
+> The `mojo run` row includes ~1.37 s of compile time per invocation — use `mojo build` for
+> production (the pre-built binary is the fair comparison). This run reflects the TLS
+> cipher-curation and session-resumption work added since the previous benchmark; the
+> absolute numbers moved a bit run-to-run (shared-machine noise), but the ~3× relative gap
+> over Python held steady.
 
 Full results are exported to `benchmark/results.md` on each run.
 
 ## Limitations & roadmap
 
-- **IPv4 only** (the `sockaddr_in` path). IPv6 support would add a `sockaddr_in6` path.
-- **No connection pooling / keep-alive.** Each request opens a fresh TCP+TLS connection (the
-  server is asked to close after responding). Reuse across requests is future work.
-- **No proxy support** (`proxies` parameter).
 - **Streaming + redirects don't combine.** When `stream=True`, redirects are not followed
   (matches Python requests' caveat). Streaming a chunked-encoded body reads until close;
   incremental dechunking is future work.
 - **TLS requires OpenSSL** to be installed (the library auto-discovers it; raises `SSLError` if
   not found). A pure-Mojo TLS implementation is explicitly out of scope — see `TODO.md`.
+- **Async is not yet implemented.** Mojo 1.0 ships a native async runtime (`std.runtime.asyncrt`,
+  real `async`/`await`), but its task-submission API is rough enough in this build (no public
+  `TaskGroup.add()`, an unsafe pointer required for `TaskGroupContext`) that `AsyncSession` is
+  blocked on either deeper probing or a newer nightly. See `TODO.md` "Async support".
+- **Proxy support is HTTP-proxy-only** — proxy authentication, HTTPS proxies (TLS to the proxy
+  itself), SOCKS proxies, `*_PROXY`/`NO_PROXY` env vars, and pooling of proxied connections are
+  all unimplemented. See the [Proxies](#proxies) section below for exactly what's supported.
+- **Cookie jar is minimal** — parses `name=value` from `Set-Cookie`, ignores
+  Path/Domain/Expires/Secure/HttpOnly attributes.
+- **No happy-eyeballs (RFC 8305)** for dual-stack (IPv4+IPv6) connection racing — IPv6 is
+  supported, but when `getaddrinfo` returns both families the first IPv4 result is preferred and
+  IPv6 is a fallback, not a race.
 
 ### Implemented
 
 - [x] HTTP/1.1 GET/POST/PUT/PATCH/DELETE/HEAD/OPTIONS over TCP (libc FFI, no Python, no libcurl)
-- [x] HTTPS/TLS via OpenSSL (auto-discovered, `dlopen`'d at runtime, cert verification on)
+- [x] HTTPS/TLS via OpenSSL (auto-discovered, `dlopen`'d at runtime, cert verification on by default)
+- [x] IPv4 **and** IPv6 (`sockaddr_in` + `sockaddr_in6`, bracketed IPv6 literal URLs per RFC 3986)
 - [x] URL parsing + percent-encoding + query-string building
 - [x] Response framing: `Content-Length` and `Transfer-Encoding: chunked`
 - [x] JSON request bodies + JSON response parsing (pure-Mojo parser)
 - [x] Redirect following (`allow_redirects`, 3xx, supports absolute/protocol-relative/root-relative/relative)
 - [x] Cookie jar persistence across requests in a `Session`
 - [x] Streaming responses (`stream=True` + `iter_content(chunk_size)`)
+- [x] Connection pooling / keep-alive — `Session` reuses TCP/TLS connections per endpoint
+- [x] HTTP proxy support — absolute-form forwarding (`http://` targets) and `CONNECT` tunneling
+  (`https://` targets), per-call or per-`Session`
 - [x] TLS verification controls: `verify=False`, `ca_bundle` param, `REQUESTS_CA_BUNDLE` / `SSL_CERT_FILE` env vars
+- [x] TLS performance: cipher/protocol curation (TLS 1.2 floor, curated AEAD suites) + session
+  resumption cache on the keep-alive path
+- [x] Typed exception structs (`ConnectionError`, `Timeout`, `SSLError`, `HTTPError`, `InvalidURL`,
+  `UnsupportedScheme`, `ProxyError`, `RequestException`) classified via `exception_kind()`
 
 ## License
 
