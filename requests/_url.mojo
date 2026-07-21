@@ -34,21 +34,39 @@ struct URL(Movable, Writable):
             return self.path + "?" + self.query
         return self.path
 
+    def is_ipv6_literal(self) -> Bool:
+        """True if ``host`` is an IPv6 literal (contains a ``:``).
+
+        Stored WITHOUT brackets (RFC 3986 authority form is ``[::1]``, but we store the bare
+        ``::1`` for handing to DNS/connect); ``host_header``/``origin`` re-add the brackets per
+        RFC 7230 §5.5.
+        """
+        return _find(self.host, ":") >= 0
+
+    def _display_host(self) -> String:
+        """The host as it should appear in a Host header / origin URL — bracketed for IPv6
+        literals (``::1`` → ``[::1]``), unchanged otherwise."""
+        if self.is_ipv6_literal():
+            return "[" + self.host + "]"
+        return self.host
+
     def origin(self) -> String:
         """``scheme://host[:port]`` (omits default ports 80/443)."""
         if (self.scheme == "http" and self.port == 80) or (
             self.scheme == "https" and self.port == 443
         ):
-            return self.scheme + "://" + self.host
-        return self.scheme + "://" + self.host + ":" + String(self.port)
+            return self.scheme + "://" + self._display_host()
+        return (
+            self.scheme + "://" + self._display_host() + ":" + String(self.port)
+        )
 
     def host_header(self) -> String:
         """Host header value (host[:port] if non-default for the scheme)."""
         if (self.scheme == "http" and self.port == 80) or (
             self.scheme == "https" and self.port == 443
         ):
-            return self.host
-        return self.host + ":" + String(self.port)
+            return self._display_host()
+        return self._display_host() + ":" + String(self.port)
 
     def write_to(self, mut writer: Some[Writer]):
         writer.write(self.origin(), self.path)
@@ -101,29 +119,64 @@ def parse_url(raw: String) raises -> URL:
         authority = rest
         u.path = "/"
 
-    # authority = host[:port]
+    # authority = host[:port], where host may be a bracketed IPv6 literal: [::1] or [::1]:8080
+    # (RFC 3986). We store the host WITHOUT brackets (bare "::1"), used directly for DNS/connect.
     if authority.byte_length() == 0:
         raise InvalidURL(String(t"URL missing host: {raw}"))
 
-    var colon = _find(authority, ":")
-    if colon >= 0:
-        u.host = String(authority[byte=0:colon])
-        var port_str = String(authority[byte = colon + 1 :])
-        var parsed_port = _parse_int(port_str)
-        if (
-            parsed_port == None
-            or parsed_port.value() < 1
-            or parsed_port.value() > 65535
-        ):
-            raise InvalidURL(String(t"URL has invalid port: {port_str}"))
-        u.port = parsed_port.value()
-    else:
-        u.host = authority
-        # Default port: 443 for https, 80 for http.
-        if u.scheme == "https":
-            u.port = 443
+    var auth_ptr = authority.unsafe_ptr()
+    if (
+        authority.byte_length() >= 1 and auth_ptr[0] == 0x5B
+    ):  # '[' → IPv6 literal
+        var close = _find(authority, "]")
+        if close < 0:
+            raise InvalidURL(String(t"URL has unterminated '[' in host: {raw}"))
+        u.host = String(authority[byte=1:close])  # without brackets
+        var after = authority.byte_length() - (close + 1)
+        if after == 0:
+            # No port. Default port: 443 for https, 80 for http.
+            if u.scheme == "https":
+                u.port = 443
+            else:
+                u.port = 80
         else:
-            u.port = 80
+            # Must be ":port" immediately after the ']'.
+            var rest_after_bracket = String(authority[byte = close + 1 :])
+            var rap = rest_after_bracket.unsafe_ptr()
+            if rest_after_bracket.byte_length() < 1 or rap[0] != 0x3A:  # ':'
+                raise InvalidURL(
+                    String(t"URL has garbage after IPv6 host: {raw}")
+                )
+            var port_str = String(rest_after_bracket[byte=1:])
+            var parsed_port = _parse_int(port_str)
+            if (
+                parsed_port == None
+                or parsed_port.value() < 1
+                or parsed_port.value() > 65535
+            ):
+                raise InvalidURL(String(t"URL has invalid port: {port_str}"))
+            u.port = parsed_port.value()
+    else:
+        # Plain hostname or IPv4 literal: split on the FIRST ':' (IPv4 literals have none).
+        var colon = _find(authority, ":")
+        if colon >= 0:
+            u.host = String(authority[byte=0:colon])
+            var port_str = String(authority[byte = colon + 1 :])
+            var parsed_port = _parse_int(port_str)
+            if (
+                parsed_port == None
+                or parsed_port.value() < 1
+                or parsed_port.value() > 65535
+            ):
+                raise InvalidURL(String(t"URL has invalid port: {port_str}"))
+            u.port = parsed_port.value()
+        else:
+            u.host = authority
+            # Default port: 443 for https, 80 for http.
+            if u.scheme == "https":
+                u.port = 443
+            else:
+                u.port = 80
 
     return u^
 

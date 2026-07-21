@@ -236,11 +236,12 @@ Keep that priming call.
 ### 5.2 First contact with a real hostname can still hiccup → retry with backoff
 
 Even after warmup, the first lookup of an external hostname can fail transiently.
-`_resolve_by_name` retries up to **5 times** with exponential backoff (50/100/200/400ms via
-`nanosleep`). This was bumped from 3→5 after the macOS CI runner failed with the shorter
-retry.
+`_getaddrinfo` retries up to **5 times** with exponential backoff (50/100/200/400ms via
+`std.time.sleep`, which replaced a hand-rolled `nanosleep` FFI + `struct timespec` — `std.time`
+is the idiomatic Mojo way and dropped the libc `Timespec` mirror entirely). This was bumped
+from 3→5 after the macOS CI runner failed with the shorter retry.
 
-**Where:** [`requests/_dns.mojo`](requests/_dns.mojo) `_resolve_by_name` (~L73-81).
+**Where:** [`requests/_dns.mojo`](requests/_dns.mojo) `_getaddrinfo` retry loop.
 
 ### 5.3 Resolve DNS before header Dict allocations (ordering workaround)
 
@@ -265,6 +266,52 @@ tests via env. **Do not introduce tests that require real outbound DNS/TLS.**
 
 **Where:** [`tests/server.py`](tests/server.py), [`.github/workflows/ci.yml`](.github/workflows/ci.yml),
 [`AGENTS.md`](AGENTS.md) CI section.
+
+### 5.6 `AF_INET6` is NOT portable (30 on macOS/BSD, 10 on Linux) — never hard-code it
+
+**Symptom:** `inet_pton(AF_INET6, "::1", &dst)` returned `-1` (`EAFNOSUPPORT`) on macOS when
+`AF_INET6` was declared as `comptime AF_INET6: c_int = 10` (the Linux value). Resolving any
+IPv6 literal failed immediately.
+
+**Cause:** The address-family constants aren't fixed by POSIX the way `AF_INET` (2) is.
+`AF_INET6` is **30 on macOS/BSD** and **10 on Linux** — verified empirically with a C probe
+(`#include <sys/socket.h>`; `printf("AF_INET6=%d\n", AF_INET6)`). The original plan assumed
+they were identical; they are not.
+
+**Fix:** Don't hard-code `AF_INET6` anywhere. For literal parsing, route IPv6 through
+`getaddrinfo(host, AI_NUMERICHOST)` instead of `inet_pton(AF_INET6, ...)` — `getaddrinfo`
+reports the correct per-platform `ai_family`. For `socket()` / `sin6_family`, carry the raw
+`ai_family` value through in `ResolvedAddress.pf` and pass *that* (not a comptime constant).
+Family detection in the addrinfo walk compares against the portable `AF_INET` (2) and treats
+anything else as IPv6 — with our `AF_UNSPEC` + `SOCK_STREAM` hints, `getaddrinfo` only ever
+returns AF_INET or AF_INET6, so this is safe.
+
+**Where:** [`requests/_dns.mojo`](requests/_dns.mojo) (no `AF_INET6` comptime const exists;
+family carried via `ResolvedAddress.pf`), [`requests/_net.mojo`](requests/_net.mojo) `_do_connect`.
+
+### 5.7 Sliced-String host handed to `getaddrinfo` gets clobbered (same class as §1.1)
+
+**Symptom:** `resolve("::1")` worked in isolation, but `resolve(parse_url("http://[::1]:8080/").host)`
+failed with `ConnectionError: DNS resolution failed for host: ::1` — same bytes (3, `::1`), same
+call, different outcome.
+
+**Cause:** This is the §1.1 `String.unsafe_ptr()`-not-stable-across-FFI bug, surfacing in DNS
+rather than TLS. `parse_url` extracts the host via `String(authority[byte=1:close])`; by the
+time `_getaddrinfo` passes `host.unsafe_ptr()` to `getaddrinfo`, intervening allocations
+(`alloc[AddrInfo]`, the result ptr) have clobbered the buffer the FFI shim materialized. The
+sliced host's backing storage is especially fragile.
+
+**Failed attempt at the fix:** `String() + x` normalization (the §1.2 recipe for char-by-char
+strings) made it *worse* — the concatenation produces a buffer getaddrinfo rejects even more
+reliably. (§1.2's "normalize with `String() + x`" is not a universal cure; it helps some
+String-build artifacts and hurts others. Diagnose, don't cargo-cult.)
+
+**Fix:** Copy the host into an explicitly `alloc`'d, NUL-terminated buffer that we own and pass
+*that* pointer — the same pattern `_tls.mojo` uses for the CA-bundle path and SNI hostname
+(`_cstr` helper). Applied to both `inet_pton` and `getaddrinfo` calls in `_dns.mojo`.
+
+**Where:** [`requests/_dns.mojo`](requests/_dns.mojo) `_cstr` helper + its call sites in
+`resolve` / `_getaddrinfo`.
 
 ---
 

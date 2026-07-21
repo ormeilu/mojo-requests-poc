@@ -7,6 +7,7 @@
 
 from std.testing import assert_equal, assert_true, assert_false, TestSuite
 from requests._url import parse_url, url_encode, build_query_string, _find
+from requests._dns import resolve
 from requests._http import build_request, parse_response
 from requests._json import parse_json
 from requests.exceptions import exception_kind
@@ -92,6 +93,100 @@ def test_build_query_string() raises:
     var qs = build_query_string(params)
     assert_true(_contains(qs, "a=1"), "query should contain a=1")
     assert_true(_contains(qs, "b=two+words"), "query should encode b")
+
+
+# --- IPv6 literal URL parsing ---
+#
+# RFC 3986: an IPv6 literal in a URL authority is wrapped in brackets — http://[::1]:8080/ —
+# because IPv6 literals contain ':' which would otherwise collide with the port separator. We
+# store the host WITHOUT brackets (bare "::1", used directly for DNS/connect), and host_header()
+# / origin() re-add the brackets per RFC 7230 §5.5.
+
+
+def test_parse_ipv6_literal_with_port() raises:
+    var u = parse_url("http://[::1]:8080/path")
+    assert_equal(u.host, "::1")
+    assert_equal(u.port, 8080)
+    assert_equal(u.path, "/path")
+    assert_true(u.is_ipv6_literal(), "::1 should be an IPv6 literal")
+    assert_equal(u.host_header(), "[::1]:8080")
+    assert_equal(u.origin(), "http://[::1]:8080")
+
+
+def test_parse_ipv6_literal_default_port() raises:
+    var u = parse_url("http://[::1]/")
+    assert_equal(u.host, "::1")
+    assert_equal(u.port, 80)
+    assert_equal(u.host_header(), "[::1]")
+    assert_equal(u.origin(), "http://[::1]")
+
+
+def test_parse_ipv6_literal_https() raises:
+    var u = parse_url("https://[2001:db8::1]/x")
+    assert_equal(u.host, "2001:db8::1")
+    assert_equal(u.port, 443)
+    assert_equal(u.host_header(), "[2001:db8::1]")
+    assert_equal(u.origin(), "https://[2001:db8::1]")
+
+
+def test_parse_ipv6_literal_unterminated_rejected() raises:
+    var raised = False
+    try:
+        _ = parse_url("http://[::1/path")
+    except _:
+        raised = True
+    assert_true(raised, "unterminated '[' should be rejected")
+
+
+def test_parse_ipv6_literal_garbage_after_bracket_rejected() raises:
+    var raised = False
+    try:
+        _ = parse_url("http://[::1]x/path")
+    except _:
+        raised = True
+    assert_true(raised, "garbage after ']' should be rejected")
+
+
+def test_parse_ipv4_literal_not_treated_as_ipv6() raises:
+    # Regression guard: IPv4 literals / hostnames don't trigger the IPv6 bracket path.
+    var u = parse_url("http://127.0.0.1:9090/p")
+    assert_equal(u.host, "127.0.0.1")
+    assert_false(u.is_ipv6_literal(), "127.0.0.1 is not an IPv6 literal")
+    assert_equal(u.host_header(), "127.0.0.1:9090")
+
+
+def test_build_get_request_ipv6_host_brackets_host_header() raises:
+    var u = parse_url("http://[::1]:9090/a?x=1")
+    var headers: Dict[String, String] = {"User-Agent": "test/1.0"}
+    var req = build_request("GET", u, headers, "")
+    assert_true(_contains(req, "GET /a?x=1 HTTP/1.1"), "request line")
+    assert_true(
+        _contains(req, "Host: [::1]:9090"), "bracketed IPv6 host header"
+    )
+
+
+# --- DNS resolver: IPv4 / IPv6 literal detection (no network) ---
+#
+# `resolve("::1")` is a literal probe (AI_NUMERICHOST) — no DNS round-trip, no network needed,
+# so it's safe to exercise unconditionally in CI. `resolve("127.0.0.1")` goes through the
+# inet_pton(AF_INET) fast path. Both assert the family their callers will dispatch on.
+
+
+def test_resolve_ipv4_literal() raises:
+    var a = resolve("127.0.0.1")
+    assert_true(a.is_ipv4(), "127.0.0.1 should resolve as IPv4")
+    assert_false(a.is_ipv6(), "127.0.0.1 should not be IPv6")
+
+
+def test_resolve_ipv6_loopback_literal() raises:
+    var a = resolve("::1")
+    assert_true(a.is_ipv6(), "'::1' should resolve as IPv6")
+    assert_false(a.is_ipv4(), "'::1' should not be IPv4")
+
+
+def test_resolve_ipv6_full_literal() raises:
+    var a = resolve("2001:db8::1")
+    assert_true(a.is_ipv6(), "'2001:db8::1' should resolve as IPv6")
 
 
 # --- Request building ---
